@@ -1,0 +1,23 @@
+module QtGraphicalEffects
+DropShadow 1.0 DropShadow.qml
+Glow 1.0 Glow.qml
+RectangularGlow 1.0 RectangularGlow.qml
+ColorOverlay 1.0 ColorOverlay.qml
+Colorize 1.0 Colorize.qml
+Desaturate 1.0 Desaturate.qml
+FastBlur 1.0 FastBlur.qml
+GaussianBlur 1.0 GaussianBlur.qml
+OpacityMask 1.0 OpacityMask.qml
+RadialGradient 1.0 RadialGradient.qml
+LinearGradient 1.0 LinearGradient.qml
+ConicalGradient 1.0 ConicalGradient.qml
+BrightnessContrast 1.0 BrightnessContrast.qml
+HueSaturation 1.0 HueSaturation.qml
+LevelAdjust 1.0 LevelAdjust.qml
+InnerShadow 1.0 InnerShadow.qml
+ThresholdMask 1.0 ThresholdMask.qml
+DirectionalBlur 1.0 DirectionalBlur.qml
+RadialBlur 1.0 RadialBlur.qml
+ZoomBlur 1.0 ZoomBlur.qml
+Displace 1.0 Displace.qml
+Blend 1.0 Blend.qml
