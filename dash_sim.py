@@ -28,7 +28,7 @@ from PySide6.QtQml import qmlRegisterType
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QGridLayout,
     QLabel, QSlider, QCheckBox, QComboBox, QPushButton, QGroupBox, QScrollArea,
-    QSizePolicy, QFrame,
+    QSizePolicy, QFrame, QLineEdit,
 )
 from PySide6.QtQuickWidgets import QQuickWidget
 
@@ -116,6 +116,7 @@ class DashData(QObject):
     symbolsdataChanged         = Signal()
     symbols2dataChanged        = Signal()
     can203dataChanged          = Signal()
+    canasciidataChanged        = Signal()
 
     def __init__(self):
         super().__init__()
@@ -139,6 +140,7 @@ class DashData(QObject):
             "symbolsdata": 0,
             "symbols2data": 0,
             "can203data": [0] * 16,
+            "canasciidata": "",
         }
 
     def _notify(self, key):
@@ -194,6 +196,7 @@ class DashData(QObject):
     symbolsdata        = Property(int,   _g("symbolsdata"),        notify=symbolsdataChanged)
     symbols2data       = Property(int,   _g("symbols2data"),       notify=symbols2dataChanged)
     can203data         = Property(list,  _g("can203data"),         notify=can203dataChanged)
+    canasciidata       = Property(str,   _g("canasciidata"),       notify=canasciidataChanged)
 
 
 # ---------------------------------------------------------------------------
@@ -512,7 +515,11 @@ class MainWindow(QMainWindow):
         eng.addImportPath(HERE)
         for d in self._dash_dirs():
             eng.addImportPath(d)
+        # Expose the same data object under both names: older firmware/screens
+        # bind to `rpmtest`, newer ones to `realtimedata`. Pointing both at the
+        # same instance means a dash works with whichever name it references.
         self.view.rootContext().setContextProperty("rpmtest", self.data)
+        self.view.rootContext().setContextProperty("realtimedata", self.data)
 
         stage_qml = _find_stage()
         if not os.path.isfile(stage_qml):
@@ -798,6 +805,19 @@ class MainWindow(QMainWindow):
         self.input_boxes[0x01].setChecked(True)   # ignition on by default
         v.addWidget(g_in)
 
+        # --- ECU ASCII text (canasciidata) ---
+        # Free-text the ECU pushes to the cluster; screens read it from
+        # rpmtest/realtimedata.canasciidata. Type here to drive it live.
+        g_txt = QGroupBox("ECU text  (canasciidata)")
+        tv = QVBoxLayout(g_txt)
+        self.canascii_edit = QLineEdit()
+        self.canascii_edit.setPlaceholderText("Type text to display on canasciidata\u2026")
+        self.canascii_edit.setMaxLength(64)
+        self.canascii_edit.textChanged.connect(
+            lambda s: self.data.set("canasciidata", s))
+        tv.addWidget(self.canascii_edit)
+        v.addWidget(g_txt)
+
         # --- remote / D-pad ---
         # Settings screens (the *_main.qml) are driven by a remote. The four
         # directions arrive as udp_packetdata bits (up=0x01 down=0x02 left=0x04
@@ -870,6 +890,17 @@ class MainWindow(QMainWindow):
             self.data.set("tripmileage0data", 0)
             self.trip.set_real(0)
             self._demo_trip = 0.0      # keep a running demo counting up from 0
+        # "Ignition" (0x01): turning the key off stops the engine (rpm and oil
+        # pressure fall to zero); turning it on starts it at idle. This makes the
+        # engine-off state visible even on dashes that don't gate on the bit, and
+        # stacks with the shutdown animations on dashes that do.
+        elif mask == 0x01:
+            if on:
+                self.rpm.set_real(900);  self.data.set("rpmdata", 900)
+                self.oilp.set_real(4.0); self.data.set("oilpressuredata", 4.0)
+            else:
+                self.rpm.set_real(0);    self.data.set("rpmdata", 0)
+                self.oilp.set_real(0);   self.data.set("oilpressuredata", 0)
 
     def _reset(self):
         if self.demo_btn.isChecked():
@@ -885,6 +916,7 @@ class MainWindow(QMainWindow):
         self.gear.setCurrentIndex(0)
         for mask, cb in self.input_boxes.items():
             cb.setChecked(mask == 0x01)
+        self.canascii_edit.clear()
         self._push_all()
 
     def _push_all(self):
@@ -1064,11 +1096,11 @@ class MainWindow(QMainWindow):
 
 
 def _qt_message_filter(mode, ctx, msg):
-    # Some dashes (e.g. LFA) read rpmtest.<field> without a null guard. While a
-    # dash is being (re)instantiated by the Loader, those bindings fire once
-    # before the context property resolves, emitting a harmless TypeError that
-    # immediately re-evaluates correctly. Drop only those transients; pass the
-    # rest through so real errors stay visible.
+    # Some dashes read rpmtest.<field> / realtimedata.<field> without a null
+    # guard. While a dash is being (re)instantiated by the Loader, those bindings
+    # fire once before the context property resolves, emitting a harmless
+    # TypeError that immediately re-evaluates correctly. Drop only those
+    # transients; pass the rest through so real errors stay visible.
     transient = (
         ("Cannot read property" in msg and ("of null" in msg or "of undefined" in msg))
         or "Unable to assign [undefined]" in msg
