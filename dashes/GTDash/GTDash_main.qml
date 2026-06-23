@@ -13,7 +13,7 @@
 **     Up                  open the settings menu
 **     Left / Right        move between settings
 **     Up / Down           change the selected value (hold to ramp)
-**     EXIT row + Up       save to /opt/IC7/screen_configs/gtdash_config.txt & close
+**     EXIT row + Up       save to the resolved config path (see cfgCandidates) & close
 **
 **  D-pad read from rpmtest.inputsdata (udp_packetdata fallback):
 **     up 0x20  down 0x2000  left 0x20000000  right 0x40000000
@@ -103,14 +103,100 @@ Item {
     property var d: (typeof rpmtest !== 'undefined') ? rpmtest : null
     property real rpm:       d ? d.rpmdata          : 0
     property real speed:     d ? d.speeddata        : 0      // km/h
+    property real peakRpm:   0      // session high-water marks (PEAK card); in-memory,
+    property real peakSpeed: 0      // km/h canonical -> reset on power cycle
+    onSpeedChanged: if (speed > peakSpeed) peakSpeed = speed
     property int  gearpos:   d ? d.geardata         : 0
     property real watertemp: d ? d.watertempdata    : 0      // °C
     property real fuel:      d ? d.fueldata         : 0      // 0..100 %
     property real odometer:  d ? (d.odometer0data    / 10) : 0   // tenths of km
     property int  tripmeter: d ? (d.tripmileage0data / 10) : 0   // tenths of km
     property int  inputs:    d ? d.inputsdata       : 0
+    // ECU ASCII status text over CAN (e.g. "TPMS Fault", "Slip %"). Host may send
+    // it as a string or a NUL-terminated byte array; decode both. The raw read is
+    // a binding so it stays reactive; absent in the sim -> "" (line stays hidden).
+    // Read as a QML string so the host QByteArray/QString is coerced cleanly (the
+    // reference dash does the same). Then sanitise: keep printable ASCII up to the
+    // first NUL and trim. This drops the stray control/padding bytes that render as
+    // boxes ("[]") while a multi-frame ECU message is still streaming in.
+    // ECU ASCII status text (CAN canasciidata), shown raw. Read as a QML string
+    // so the host value is coerced cleanly, then drop control / non-printable
+    // bytes (which would render as boxes) and trim the ends — without truncating
+    // at NULs. No buffering, assembly or rate-limiting: the line always reflects
+    // exactly the current value the ECU is sending, and clears when it clears.
+    property string canAsciiRaw: d ? d.canasciidata : ""
+    readonly property string canAsciiStr: {
+        var src = root.canAsciiRaw;
+        if (!src) return "";
+        var out = "";
+        for (var i = 0; i < src.length; i++) {
+            var c = src.charCodeAt(i);
+            if (c >= 32 && c < 127) out += src.charAt(i);   // keep printable ASCII; drop NUL/control/high bytes
+        }
+        return root.canAsciiCollapse(out.trim());
+    }
+    // True if b is the same characters as a in a rotated order once spaces are
+    // removed (b is a rotation of a). Recognises a no-separator repeat that the
+    // collapse reordered ("7% Slip" vs "Slip7%", "LTC Off" vs "OffLTC") so the
+    // display can hold the version already shown instead of flipping to the garble.
+    function canAsciiSameRotation(a, b) {
+        // a = fresh candidate, b = the text already on screen. Only treat a as
+        // a garbled rotation of b when a has NO separator but b DOES -- i.e. a
+        // is the space-stripped, reordered repeat ("Slip7%" of "7% Slip"). Two
+        // distinct single words that happen to be rotations (STOP/POST) both
+        // lack spaces and so are left alone (hardened residual-risk guard).
+        if (a.indexOf(" ") >= 0 || b.indexOf(" ") < 0) return false;
+        var x = a.split(" ").join(""), y = b.split(" ").join("");
+        if (!x.length || x.length !== y.length || x === y) return false;
+        return (x + x).indexOf(y) >= 0;
+    }
+    // Message severity: faults outrank info. Drives BOTH the min-dwell and the
+    // severity-hold gate in canAsciiSettle (one notion, no separate priority).
+    function canAsciiSeverity(s) {
+        if (!s) return 0;                                   // blank
+        return (s.indexOf("FAULT") >= 0 || s === "TPMS") ? 2 : 1;   // 2 = fault-class, 1 = info
+    }
+    // Collapse a host buffer that does not self-clear and piles a message up.
+    // Word-level only: drop word-fragments left by a window that opened or closed
+    // mid-word, drop consecutive duplicate words, then collapse an exact repeated
+    // phrase to one copy. Distinct messages ("TPMS FAULT", "Boost Control Fault
+    // Detected") have no such repeat and pass through untouched.
+    // NOTE: a char-level "smallest period" collapse was tried and removed -- it
+    // mangled FAULT. Do NOT reintroduce it.
+    function canAsciiCollapse(out) {
+        if (!out.length) return "";
+        var w = out.split(/\s+/);
+        // The host window can open or close mid-word, so the first token may be a
+        // SUFFIX of the real word ("AULT FAULT", "T FAULT", "ULT FAULT") and the
+        // last token a PREFIX of it ("FAULT FAU", "LT FAULT FAU"). Drop those
+        // partials. (substring, not endsWith/startsWith, for Qt 5.12.8 V4 safety.)
+        if (w.length >= 2) {
+            var f = w[0], s = w[1];
+            if (f.length < s.length && s.substring(s.length - f.length) === f) w.shift();
+        }
+        if (w.length >= 2) {
+            var e = w[w.length - 1], q = w[w.length - 2];
+            if (e.length < q.length && q.substring(0, e.length) === e) w.pop();
+        }
+        var c = [];                                                // collapse consecutive duplicate words
+        for (var a = 0; a < w.length; a++)
+            if (a === 0 || w[a] !== w[a - 1]) c.push(w[a]);
+        var n = c.length;                                          // collapse an exact repeated phrase
+        for (var pp = 1; pp <= (n >> 1); pp++) {
+            if (n % pp !== 0) continue;
+            var rep = true;
+            for (var j = pp; j < n; j++) { if (c[j] !== c[j - pp]) { rep = false; break; } }
+            if (rep) return c.slice(0, pp).join(" ");
+        }
+        return c.join(" ");
+    }
     property real oiltemp:   d ? d.oiltempdata      : 0      // °C (native)
     property real oilpress:  d ? (d.oilpressuredata * 14.5038) : 0  // native BAR -> PSI (canonical)
+    // Smoothed oil-pressure display: sweeps up from 0 as the engine builds
+    // pressure on start (and eases down on shut-off) instead of snapping.
+    property real oilPressShown: 0
+    Behavior on oilPressShown { SmoothedAnimation { velocity: 60 } }   // ~PSI/sec
+    onOilpressChanged: oilPressShown = oilpress
     property real afr:       d ? (d.o2data * 14.7)  : 0      // native lambda -> AFR (canonical, x14.7)
     property real battery:   d ? d.batteryvoltagedata : 0    // volts
 
@@ -140,10 +226,10 @@ Item {
     property int  fuelDamp:      3
     property real oilTempHigh:   130   // °C (canonical)
     property real oilTempLow:    80    // °C (canonical)
-    property int  oilTempUnits:  0     // 0 = °C, 1 = °F
+    property int  oilTempUnits:  0     // 0 = °C, 1 = °F, 2 = OFF (blank), 3 = PEAK card
     property real oilPressHigh:  90    // PSI (canonical)
     property real oilPressLow:   15    // PSI (canonical)
-    property int  oilPressUnits: 1     // 0 = PSI, 1 = BAR  (sensor is native BAR)
+    property int  oilPressUnits: 1     // 0 = PSI, 1 = BAR, 2 = OFF  (sensor native BAR)
     property real batteryHigh:   14.8
     property real batteryLow:    11.8
     property real afrHigh:       1.02   // O2 limits stored in LAMBDA (1.02 = 15.0 AFR)
@@ -157,10 +243,11 @@ Item {
     // Each unit/source setting has an OFF state (the highest value) that hides
     // that side gauge entirely — both its panel box (static layer) and its live
     // content (dynamic layer): oil-temp/oil-press/coolant OFF=2, AFR OFF=3.
-    readonly property bool showOilTemp:  oilTempUnits  !== 2
+    readonly property bool showOilTemp:  oilTempUnits  <= 1                 // °C/°F only; OFF(2) blank
     readonly property bool showOilPress: oilPressUnits !== 2
     readonly property bool showCoolant:  tempunits     !== 2
     readonly property bool showAfr:      afrSource     !== 2
+    readonly property bool showPeak:     oilTempUnits  === 3                // PEAK card takes the oil-temp slot
 
     // --- display ---
     property int  nightlight: 0        // 0..100 night dimmer (0 = off)
@@ -169,12 +256,20 @@ Item {
     function hx(n) { n = Math.max(0, Math.min(255, Math.round(n))); var s = n.toString(16); return (s.length < 2 ? "0" : "") + s; }
     readonly property string accent: "#" + hx(red) + hx(green) + hx(blue)
     // rpm-needle smoothing. The spring chases rpmDisplay toward the live rpm.
-    // RPM DAMPING 1..10 maps linearly to spring stiffness: 1 = snappiest (stiff,
-    // tracks a throttle blip tightly) ... 10 = smoothest (calm, gliding needle).
-    // Every step changes the feel (an earlier formula clamped 1..3 to the same
-    // max). springDamp (below) is paired to the stiffness to stay near-
-    // critically-damped: fast settle, ~no overshoot.
-    readonly property real springVal: 60.0 - (Math.max(1, Math.min(10, rpmDamp)) - 1) * ((60.0 - 12.0) / 9.0)
+    // RPM DAMPING 1..10 sets the rpm-needle spring stiffness: 1 = snappiest
+    // (tracks a throttle blip tightly), 10 = a calm, lazy gliding needle.
+    // Geometric scale — each step multiplies stiffness by a constant ratio
+    // (~0.63), so the *perceived* change is even across 1..10 instead of
+    // bunching at the stiff end. Measured settle (step to 5000 rpm, to within
+    // 2%), desktop sim — approximate, confirm feel on hardware:
+    //    damp  spring  settle        damp  spring  settle
+    //     1     55.0   ~25 ms         6      5.2   ~175 ms
+    //     2     34.4   ~50 ms         7      3.3   ~300 ms
+    //     3*    21.5   ~75 ms         8      2.0   ~475 ms
+    //     4     13.4   ~100 ms        9      1.3   ~900 ms
+    //     5      8.4   ~150 ms        10     0.8   ~1400 ms
+    //   (* = default)
+    readonly property real springVal: 55.0 * Math.pow(0.8 / 55.0, (Math.max(1, Math.min(10, rpmDamp)) - 1) / 9.0)
 
     // ---- bundled UI font ---------------------------------------------------
     // The IC7's Qt does not alias the generic "sans-serif" to a sans font (it
@@ -205,9 +300,9 @@ Item {
     // ---- spring-damped rpm + animation clock ------------------------------
     property real rpmDisplay: 0
     // damping 0.55 settles fast with little overshoot (was 0.30 = bouncy/slow).
-    readonly property real springDamp: 0.55 + springVal * 0.014   // near-critical
+    readonly property real springDamp: 0.30 + springVal * 0.025   // paired to the stiffness: clean settle, ~no bounce across the range
     Behavior on rpmDisplay { SpringAnimation { spring: root.springVal; damping: root.springDamp; epsilon: 1 } }
-    onRpmChanged: rpmDisplay = rpm
+    onRpmChanged: { rpmDisplay = rpm; if (rpm > peakRpm) peakRpm = rpm; }
 
     // ---- power-on self-test sweep ------------------------------------------
     //  On boot, sweep the tach 0 -> max -> 0 while every telltale and shift
@@ -216,12 +311,19 @@ Item {
     //  what the tach, rpm number and shift lights read.
     property bool  selfTest: true
     property real  sweepRpm: 0
-    readonly property real rpmShown: selfTest ? sweepRpm : rpmDisplay
+    property real  settle:   0   // 0 = showing the swept value, 1 = eased onto live
+    // during the test the tach sweeps up, then eases from the peak onto the live
+    // value so nothing snaps when the test hands over to real data
+    readonly property real rpmShown: selfTest ? (sweepRpm * (1 - settle) + rpmDisplay * settle) : rpmDisplay
+    // 0..1 sweep progress; drives every bar during the power-on self-test
+    readonly property real sweepFrac: Math.max(0, Math.min(1, sweepRpm / Math.max(1, rpmmax)))
     SequentialAnimation {
         id: bootSweep; running: false
+        // sweep the tach + every bar up to full
         NumberAnimation { target: root; property: "sweepRpm"; from: 0; to: root.rpmmax; duration: 850; easing.type: Easing.OutCubic }
-        NumberAnimation { target: root; property: "sweepRpm"; to: 0;             duration: 650; easing.type: Easing.InCubic }
-        PauseAnimation  { duration: 140 }
+        PauseAnimation  { duration: 200 }
+        // then ease everything from full down onto the real live values (no snap)
+        NumberAnimation { target: root; property: "settle";   from: 0; to: 1;            duration: 700; easing.type: Easing.InOutCubic }
         ScriptAction    { script: root.selfTest = false }
     }
 
@@ -237,6 +339,8 @@ Item {
     Behavior on fuelDisplay { SmoothedAnimation { velocity: root.fuelVel } }
     onFuelChanged: fuelDisplay = fuel
     readonly property real fuelLevel: (fuelDamp <= 0) ? fuel : fuelDisplay
+    // fuel bar fill fraction — follows the self-test sweep, else the live level
+    readonly property real fuelBarFrac: selfTest ? (sweepFrac * (1 - settle) + (fuelLevel / 100) * settle) : fuelLevel / 100
 
     // Rev-lag debug overlay: set true to compare raw vs smoothed rpm when
     // tuning a dash's needle response. Off for normal use.
@@ -259,6 +363,14 @@ Item {
     // above 0). Used to show a centred placeholder instead of a lone right-aligned
     // "0", which looks lost in the fixed-width box until the car starts.
     property bool engineOff: !selfTest && Math.round(rpmShown) < 1
+    // RPM / Speed placement: false (default) keeps RPM big on top with speed
+    // below; true swaps them. Each value keeps its own formatting (fixed-width
+    // rpm, speed unit, engine-off dashes); only the slot it occupies changes.
+    property bool placementSwap: false
+    // Hide the 1k tach scale numbers when true (default false = shown).
+    property bool hideTachNums: false
+    // Hide the three shift lights below the tach when true (default false).
+    property bool hideShiftLights: false
     property int  speedShown: (speedunits === 0) ? speed : Math.round(speed / 1.609)
     property string gearLabel: {
         if ((root.inputs & 0x4000000) !== 0) return "R";   // reverse bit forces "R"
@@ -282,21 +394,21 @@ Item {
     }
     function gaugeWarn(k) {
         if (k === "oiltemp")  return oiltemp  >= oilTempHigh;
-        if (k === "oilpress") return oilpress <= oilPressLow || oilpress >= oilPressHigh;
+        if (k === "oilpress") return (!engineOff && oilPressShown <= oilPressLow) || oilPressShown >= oilPressHigh;
         if (k === "afr")      { var l = afr / 14.7; return l < afrLow || l > afrHigh; }
         return watertemp >= coolantHigh;   // coolant
     }
     function gaugeFrac(k) {
         var f;
         if (k === "oiltemp")       f = (oiltemp  - oilTempLow)  / Math.max(1, oilTempHigh  - oilTempLow);
-        else if (k === "oilpress") f = (oilpress - oilPressLow) / Math.max(1, oilPressHigh - oilPressLow);
+        else if (k === "oilpress") f = (oilPressShown - oilPressLow) / Math.max(1, oilPressHigh - oilPressLow);
         else if (k === "afr")    { var l = afr / 14.7; f = (l - afrLow) / Math.max(0.001, afrHigh - afrLow); }
         else                       f = (watertemp - coolantLow) / Math.max(1, coolantHigh - coolantLow);
         return Math.max(0, Math.min(1, f));
     }
     function gaugeVal(k) {
         if (k === "oiltemp")  return String(Math.round(oilTempUnits === 0 ? oiltemp : oiltemp * 9/5 + 32));
-        if (k === "oilpress") return oilPressUnits === 0 ? String(Math.round(oilpress)) : (oilpress / 14.5038).toFixed(1);
+        if (k === "oilpress") return oilPressUnits === 0 ? String(Math.round(oilPressShown)) : (oilPressShown / 14.5038).toFixed(1);
         if (k === "afr")      return afrSource === 0 ? afrShown.toFixed(1) : afrShown.toFixed(2);
         return String(Math.round(tempunits === 0 ? watertemp : watertemp * 9/5 + 32));   // coolant
     }
@@ -326,6 +438,8 @@ Item {
     onOilPressUnitsChanged: bg.requestPaint()
     onTempunitsChanged:     bg.requestPaint()
     onAfrSourceChanged:     bg.requestPaint()
+    onHideTachNumsChanged:  bg.requestPaint()
+    onSelfTestChanged:      bg.requestPaint()
 
     // ---- STATIC layer ------------------------------------------------------
     Canvas {
@@ -347,12 +461,13 @@ Item {
             ctx.clearRect(0, 0, width, height);
             ctx.fillStyle = "#05070d"; ctx.fillRect(0, 0, width, height);   // backdrop
             ctx.fillStyle = "#0a1326"; ctx.fillRect(0, 366, width, 44);     // bottom bar
-            drawTachStatic(ctx);     // bezel + baseline ticks + number labels
+            drawTachStatic(ctx);     // bezel + baseline ticks
             drawCentreStatic(ctx);   // inner disc + gear pill + divider
-            if (root.showOilTemp)  box(ctx, 12,  96, 176, 104);   // side boxes (hidden when
-            if (root.showOilPress) box(ctx, 12, 214, 176, 104);   // their unit is set to OFF)
-            if (root.showAfr)      box(ctx, 612, 96, 176, 104);
-            if (root.showCoolant)  box(ctx, 612, 214, 176, 104);
+            drawTachNumbers(ctx);    // 1k scale labels (on top of the disc)
+            if (root.showOilPress || root.selfTest) box(ctx, 12,  96, 176, 104);   // side boxes (hidden when
+            if (root.showOilTemp  || root.showPeak || root.selfTest) box(ctx, 12, 214, 176, 104);   // their unit is OFF; all
+            if (root.showAfr      || root.selfTest) box(ctx, 612, 96, 176, 104);   // shown during self-test)
+            if (root.showCoolant  || root.selfTest) box(ctx, 612, 214, 176, 104);
         }
 
         function drawTachStatic(ctx) {
@@ -370,12 +485,16 @@ Item {
                 ctx.lineTo(cx + ro * Math.cos(a), cy + ro * Math.sin(a));
                 ctx.stroke();
             }
-            // number labels 0..9 (red in the shift zone)
-            ctx.font = "bold 30px " + root.ff; ctx.textAlign = "center"; ctx.textBaseline = "middle";
-            var rLbl = bandIn - 22;
-            for (var n = 0; n <= 9; n++) {
+        }
+
+        // 1k scale labels — drawn on TOP of the centre disc (see onPaint order)
+        function drawTachNumbers(ctx) {
+            if (root.hideTachNums) return;
+            ctx.font = "bold 23px " + root.ff; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+            var rLbl = gaugeR - 58;
+            for (var n = 0; n * 1000 <= root.rpmmax; n++) {
                 var an = ang(n * 1000);
-                ctx.fillStyle = (n * 1000 >= root.rpmredline) ? "#ff5555" : "#ffffff";
+                ctx.fillStyle = (n * 1000 >= root.rpmredline) ? "#ff6a6a" : "#e9eefb";
                 ctx.fillText(String(n), cx + rLbl * Math.cos(an), cy + rLbl * Math.sin(an));
             }
         }
@@ -492,37 +611,42 @@ Item {
         Text {
             id: rpmMetric; visible: false
             text: String(root.rpmmax)
-            font.family: root.menuFont; font.bold: true; font.pixelSize: 70
+            font.family: root.menuFont; font.bold: true; font.pixelSize: root.placementSwap ? 52 : 62
         }
         Text {   // rpm number — fixed-width box, right-aligned so digits don't reflow.
                  // Engine off: dimmed four-dash placeholder filling the box.
             id: rpmNum
-            text: root.engineOff ? "\u2013\u2013\u2013\u2013" : String(Math.round(root.rpmShown))
+            text: root.engineOff ? "\u2013\u2013\u2013\u2013" : String(Math.round(root.rpmShown / 10) * 10)
             color: root.engineOff ? "#566581"
                  : (root.overrev ? (root.blinkOn ? "#ff4040" : "#ff8a8a") : "#ffffff")
-            font.family: root.menuFont; font.bold: true; font.pixelSize: 70
+            font.family: root.menuFont; font.bold: true; font.pixelSize: root.placementSwap ? 52 : 62
             width: rpmMetric.implicitWidth
             horizontalAlignment: Text.AlignRight
-            x: 384 - width / 2; y: 218 - 65
+            x: (root.placementSwap ? 382 : 372) - width / 2
+            y: root.placementSwap ? (290 - 49) : (218 - 65)
         }
         Text {   // "RPM" tag, just right of the number (dimmed to match the off state)
             text: "RPM"
             color: root.engineOff ? "#566581" : (root.overrev ? "#ff5555" : root.accent)
             font.family: root.menuFont; font.bold: true; font.pixelSize: 18
-            x: rpmNum.x + rpmNum.width + 8; y: 214 - 17
+            x: rpmNum.x + rpmNum.width + 8
+            y: root.placementSwap ? 258 : (214 - 17)
         }
         Text {   // speed — real value when running (incl. "0" when stopped at a
                  // light); dimmed dash placeholder only when the engine is off
+            id: spdNum
             text: root.engineOff ? "\u2013\u2013\u2013" : String(root.speedShown)
             color: root.engineOff ? "#566581" : "#ffffff"
-            font.family: root.menuFont; font.bold: true; font.pixelSize: 52
-            x: 382 - width / 2; y: 290 - 49
+            font.family: root.menuFont; font.bold: true; font.pixelSize: root.placementSwap ? 62 : 52
+            x: (root.placementSwap ? 372 : 382) - width / 2
+            y: root.placementSwap ? (218 - 65) : (290 - 49)
         }
         Text {   // speed unit (dimmed to match the off state)
             text: root.speedunits === 0 ? "km/h" : "mph"
             color: root.engineOff ? "#566581" : "#9fb2d0"
             font.family: root.menuFont; font.bold: true; font.pixelSize: 18
-            x: 456; y: 286 - 17
+            x: root.placementSwap ? (spdNum.x + spdNum.width + 8) : 456
+            y: root.placementSwap ? 197 : (276 - 17)
         }
 
         // shift lights below speed: three red rings, completely hidden until
@@ -532,6 +656,7 @@ Item {
         // never drives the bits. (opacity 0 keeps each slot reserved so the three
         // stay fixed in place.)
         Row {
+            visible: !root.hideShiftLights
             anchors.horizontalCenter: parent.horizontalCenter
             y: 312; spacing: 16
             Repeater {
@@ -543,7 +668,7 @@ Item {
                     height: 22
                     width: implicitHeight > 0 ? 22 * implicitWidth / implicitHeight : 32
                     fillMode: Image.PreserveAspectFit
-                    smooth: true; mipmap: true; antialiasing: true
+                    smooth: true; antialiasing: true
                     opacity: {
                         var lit = ((root.inputs & modelData.bit) !== 0)
                                   || (root.rpmShown >= root.rpmredline * modelData.rpmFrac);
@@ -558,20 +683,20 @@ Item {
         // ===== four side mini-gauges (box chrome is on bg) =====
         Repeater {
             model: [
-                { kind: "oiltemp",  bx: 12,  by: 96  },
-                { kind: "oilpress", bx: 12,  by: 214 },
+                { kind: "oiltemp",  bx: 12,  by: 214 },
+                { kind: "oilpress", bx: 12,  by: 96  },
                 { kind: "afr",      bx: 612, by: 96  },
                 { kind: "coolant",  bx: 612, by: 214 }
             ]
             delegate: Item {
                 id: cell
                 x: modelData.bx; y: modelData.by; width: 176; height: 104
-                visible: root.gaugeShown(modelData.kind)
+                visible: root.selfTest || root.gaugeShown(modelData.kind)
                 property bool   warn:    root.gaugeWarn(modelData.kind)
                 // engine-damage criticals flash (low oil pressure / coolant overtemp)
-                property bool   critical:(modelData.kind === "oilpress" && root.oilpress  <= root.oilPressLow)
+                property bool   critical:(modelData.kind === "oilpress" && !root.engineOff && root.oilPressShown <= root.oilPressLow)
                                       || (modelData.kind === "coolant"  && root.watertemp >= root.coolantHigh)
-                property real   frac:    root.gaugeFrac(modelData.kind)
+                property real   frac:    root.selfTest ? (root.sweepFrac * (1 - root.settle) + root.gaugeFrac(modelData.kind) * root.settle) : root.gaugeFrac(modelData.kind)
                 property string valStr:  root.gaugeVal(modelData.kind)
                 property string unitStr: root.gaugeUnit(modelData.kind)
 
@@ -599,8 +724,49 @@ Item {
                 Rectangle {   // fill (low..high), red when out of band
                     x: 16; y: 104 - 22; height: 8
                     width: cell.frac > 0 ? Math.max(6, 144 * cell.frac) : 0
-                    color: cell.warn ? "#ff3b30" : root.accent
+                    color: (!root.selfTest && cell.warn) ? "#ff3b30" : root.accent
                 }
+            }
+        }
+
+        // ===== PEAK card (fills the oil-press slot when OIL PRESS UNIT = PEAK) =====
+        // Box chrome is on bg (drawn when showPeak); this draws only the text. The
+        // hero line (big) and secondary line (small) keep fixed positions; RPM/SPEED
+        // SWAP just picks which metric sits on each, mirroring the centre readout.
+        Item {
+            id: peakCard
+            x: 12; y: 214; width: 176; height: 104
+            visible: root.showPeak && !root.selfTest    // during self-test the slot runs the gauge sweep; PEAK takes over after
+            readonly property string rpmStr:  String(Math.round(root.peakRpm))
+            readonly property string spdStr:  root.speedunits === 0 ? String(Math.round(root.peakSpeed))
+                                                                    : String(Math.round(root.peakSpeed / 1.609))
+            readonly property string spdUnit: root.speedunits === 0 ? "KM/H" : "MPH"
+            Text {                                   // label (matches the gauge-box labels)
+                text: "PEAK"; color: root.accent
+                font.family: root.menuFont; font.bold: true; font.pixelSize: 14
+                x: 16; y: 26 - 13
+            }
+            Text {                                   // hero line (big): rpm normally, speed when swapped
+                id: pkHero
+                text: root.placementSwap ? peakCard.spdStr : peakCard.rpmStr
+                color: "#ffffff"; font.family: root.menuFont; font.bold: true; font.pixelSize: 30
+                x: 16; y: 58 - 30
+            }
+            Text {
+                text: root.placementSwap ? peakCard.spdUnit : "RPM"; color: "#9fb2d0"
+                font.family: root.menuFont; font.bold: true; font.pixelSize: 14
+                x: pkHero.x + pkHero.width + 8; y: 58 - 14
+            }
+            Text {                                   // secondary line (small): speed normally, rpm when swapped
+                id: pkSec
+                text: root.placementSwap ? peakCard.rpmStr : peakCard.spdStr
+                color: "#ffffff"; font.family: root.menuFont; font.bold: true; font.pixelSize: 22
+                x: 16; y: 90 - 22
+            }
+            Text {
+                text: root.placementSwap ? "RPM" : peakCard.spdUnit; color: "#9fb2d0"
+                font.family: root.menuFont; font.bold: true; font.pixelSize: 13
+                x: pkSec.x + pkSec.width + 8; y: 90 - 13
             }
         }
 
@@ -608,9 +774,10 @@ Item {
         Item {
             id: bat
             property bool  warn: root.battery < root.batteryLow || root.battery > root.batteryHigh
-            property color col:  warn ? "#ff5050" : root.accent
-            property real  lvl:  Math.max(0, Math.min(1, (root.battery - root.batteryLow)
+            property color col:  (!root.selfTest && warn) ? "#ff5050" : root.accent
+            readonly property real realLvl: Math.max(0, Math.min(1, (root.battery - root.batteryLow)
                                  / Math.max(0.1, root.batteryHigh - root.batteryLow)))
+            property real  lvl:  root.selfTest ? (root.sweepFrac * (1 - root.settle) + realLvl * root.settle) : realLvl
             Rectangle { x: 18; y: 379; width: 30; height: 18; color: "transparent"
                         border.color: bat.col; border.width: 2 }           // body
             Rectangle { x: 48; y: 384; width: 3;  height: 8;  color: bat.col }   // nub
@@ -628,7 +795,7 @@ Item {
                 source: "assets/service.png"
                 height: 26
                 width: implicitHeight > 0 ? 26 * implicitWidth / implicitHeight : 22
-                fillMode: Image.PreserveAspectFit; smooth: true; mipmap: true; antialiasing: true
+                fillMode: Image.PreserveAspectFit; smooth: true; antialiasing: true
                 x: vText.x + vText.width + 16
                 y: 388 - height / 2
             }
@@ -640,8 +807,8 @@ Item {
             model: 12
             delegate: Rectangle {
                 x: 664 + index * 14; y: 379; width: 11; height: 18
-                color: (index < Math.round(root.fuelLevel / 100 * 12))
-                       ? (root.fuelLevel < root.fuelLow ? "#ff4444" : "#35d84a")
+                color: (index < Math.round(root.fuelBarFrac * 12))
+                       ? ((!root.selfTest && root.fuelLevel < root.fuelLow) ? "#ff4444" : "#35d84a")
                        : "#26314a"
             }
         }
@@ -672,7 +839,7 @@ Item {
         source: root.fuelLevel < root.fuelLow ? "assets/fuel_level_warning.png"
                                               : "assets/fuel.png"
         x: 620; y: 366 + 22 - height/2; height: 26
-        fillMode: Image.PreserveAspectFit; smooth: true; mipmap: true
+        fillMode: Image.PreserveAspectFit; smooth: true
         opacity: root.fuelLevel < root.fuelLow ? 1.0 : 0.85
     }
 
@@ -707,7 +874,7 @@ Item {
                     // gives every icon the same 12px gap.
                     width: Math.min(40, implicitHeight > 0 ? 26 * implicitWidth / implicitHeight : 36)
                     fillMode: Image.PreserveAspectFit
-                    smooth: true; mipmap: true; antialiasing: true
+                    smooth: true; antialiasing: true
                     // lit when its bit is set; the TC symbol also lights when TC
                     // is switched OFF, so the OFF tag sits on a lit icon
                     opacity: (root.selfTest || (root.inputs & modelData.bit) || (ttCell.isTc && ttCell.tcOff)) ? 1.0 : 0.25
@@ -726,6 +893,102 @@ Item {
                     font.family: root.menuFont; font.bold: true; font.pixelSize: 9
                 }
             }
+        }
+    }
+
+    // ECU ASCII status line (CAN canasciidata), lower-left below the telltales.
+    // This is a cycling status line: the ECU rotates DISTINCT messages through it
+    // (FAULT, TPMS, LTC, SLIP%, ...) and also flashes misaligned fragments
+    // ("AULT FAULT"), lone partials ("LT", single letters) and empty pulses.
+    // Pipeline: (1) canAsciiStr collapses each value's own repetition/partials;
+    // (2) a 120 ms settle accepts a value only after it holds steady that long, so
+    // single-frame blips never reach the screen while a message the ECU rests on
+    // shows. Each settled message REPLACES the previous (no accumulation). An empty
+    // value arms a 3 s timer; 3 s of continuous quiet blanks the line.
+    // (3) Nuisance pattern: "TPMS" followed by a (repeating) "FAULT" is ONE occurrence
+    // -- the FAULT keeps re-showing until the next TPMS. Occurrences are tallied
+    // cumulatively (repeats or other text in between do NOT reset the count). After
+    // canAsciiSuppressAfter occurrences this power cycle, the whole TPMS fault latches
+    // off: the "TPMS" and the FAULTs that belong to it (the repeating "FAULT FAULT")
+    // stop showing for the session. A FAULT that is NOT in a TPMS-fault context (no
+    // preceding TPMS, or after other text such as "OIL FAULT" / "LTC") still shows.
+    // Latch lives in memory only -> a power cycle restores it.
+    Text {
+        id: canAsciiText
+        property string pending: root.canAsciiStr    // latest collapsed value
+        property int canAsciiPairs: 0                 // TPMS->FAULT occurrences this power cycle (cumulative)
+        property bool canAsciiAwaitFault: false       // last settled message was TPMS (next FAULT counts once)
+        property bool canAsciiInFault: false          // inside a TPMS-fault context (its FAULTs repeat)
+        property bool canAsciiHushed: false           // TPMS fault latched off for the session
+        readonly property int canAsciiSuppressAfter: 5  // hush after this many TPMS->FAULT occurrences (0 = never)
+        readonly property int canAsciiDwellMs: 900      // min ms a committed message holds before a non-higher-severity one may replace it
+        onPendingChanged: canAsciiSettle.restart()    // debounce: ignore sub-120 ms blips
+        visible: text.length > 0
+        text: ""
+        x: 28; y: 451
+        width: 580; elide: Text.ElideRight
+        color: "#ffcf6b"                              // amber ECU message
+        font.family: root.menuFont; font.bold: true; font.pixelSize: 16
+        Timer {
+            id: canAsciiSettle
+            interval: 120; repeat: false
+            onTriggered: {
+                var c = canAsciiText.pending;
+                if (!c) {
+                    canAsciiClearTimer.restart();             // empty -> arm blank
+                } else {
+                    var show = c;
+                    if (c === "TPMS") {
+                        if (canAsciiText.canAsciiSuppressAfter > 0
+                            && canAsciiText.canAsciiPairs >= canAsciiText.canAsciiSuppressAfter)
+                            canAsciiText.canAsciiHushed = true;          // enough occurrences -> latch off
+                        canAsciiText.canAsciiAwaitFault = true;          // a FAULT may follow
+                        canAsciiText.canAsciiInFault = true;             // entering the TPMS-fault context
+                        if (canAsciiText.canAsciiHushed) show = "";
+                    } else if (c === "FAULT") {
+                        if (canAsciiText.canAsciiAwaitFault) {           // first FAULT after a TPMS = one occurrence
+                            canAsciiText.canAsciiAwaitFault = false;
+                            if (!canAsciiText.canAsciiHushed) canAsciiText.canAsciiPairs += 1;
+                        }
+                        if (canAsciiText.canAsciiHushed && canAsciiText.canAsciiInFault) show = "";   // hush repeating TPMS-fault FAULT
+                        // a FAULT outside a TPMS-fault context keeps showing
+                    } else {
+                        canAsciiText.canAsciiAwaitFault = false;
+                        canAsciiText.canAsciiInFault = false;            // other text ends the TPMS-fault context
+                    }
+                    // If the new value is just a space-stripped rotation of what is
+                    // already on screen (host re-sent a no-separator repeat that the
+                    // collapse reordered, e.g. "7% Slip" -> "Slip7%"), keep the version
+                    // already shown rather than swapping to the reordered one.
+                    if (show && canAsciiText.text && show !== canAsciiText.text
+                        && root.canAsciiSameRotation(show, canAsciiText.text)) show = canAsciiText.text;
+                    // Min on-screen dwell + severity hold (one gate). A fault-class
+                    // message (sev 2) interrupts at once -- whether it replaces info
+                    // or another fault -- so the TPMS/FAULT path is unchanged. Anything
+                    // else (info) waits until the showing message has had its dwell, so
+                    // a fast ECU rotation stays readable. Severity is only info=1 /
+                    // fault=2 here, so "interrupt" reduces to "candidate is a fault".
+                    // canAsciiDwell fires at dwell-end and re-runs this settle.
+                    if (show && canAsciiText.text && show !== canAsciiText.text
+                        && root.canAsciiSeverity(show) !== 2 && canAsciiDwell.running)
+                        return;                              // hold current message through its dwell
+                    canAsciiClearTimer.stop();
+                    if (show !== canAsciiText.text) {
+                        canAsciiText.text = show;
+                        if (show) canAsciiDwell.restart(); else canAsciiDwell.stop();
+                    }
+                }
+            }
+        }
+        Timer {
+            id: canAsciiClearTimer
+            interval: 3000; repeat: false
+            onTriggered: { canAsciiText.text = ""; canAsciiText.canAsciiAwaitFault = false; canAsciiText.canAsciiInFault = false; }   // quiet ends the context
+        }
+        Timer {                                          // minimum on-screen dwell for a committed message
+            id: canAsciiDwell
+            interval: canAsciiText.canAsciiDwellMs; repeat: false
+            onTriggered: canAsciiSettle.restart()        // re-evaluate the latest pending now the dwell elapsed
         }
     }
 
@@ -758,13 +1021,13 @@ Item {
     Image {   // blinking left indicator
         source: "assets/left_indicator.png"
         x: 36; y: 18; height: 50; fillMode: Image.PreserveAspectFit
-        smooth: true; mipmap: true
+        smooth: true
         visible: root.tLeft && root.blinkOn
     }
     Image {   // blinking right indicator
         source: "assets/right_indicator.png"
         x: 718; y: 18; height: 50; fillMode: Image.PreserveAspectFit
-        smooth: true; mipmap: true
+        smooth: true
         visible: root.tRight && root.blinkOn
     }
 
@@ -779,7 +1042,15 @@ Item {
     // =======================================================================
     //  SETTINGS — config file, D-pad, and the scrolling menu (single file)
     // =======================================================================
-    readonly property string cfgPath: "/opt/IC7/screen_configs/gtdash_config.txt"
+    // Config location is resolved at startup (resolveCfgPath): some IC7 builds
+    // use /opt/Garw_IC7/..., others /opt/IC7/.... cfgPath holds the resolved path;
+    // cfgCandidates is the search order (first existing config wins; on a fresh
+    // unit the first directory that accepts a write wins).
+    property string cfgPath: "/opt/IC7/screen_configs/gtdash_config.txt"
+    readonly property var cfgCandidates: [
+        "/opt/Garw_IC7/screen_configs/gtdash_config.txt",
+        "/opt/IC7/screen_configs/gtdash_config.txt"
+    ]
     FileIO {
         id: cfg
         // IC7 maps this to <dash>/screen_configs/gtdash_config.txt.
@@ -802,6 +1073,25 @@ Item {
         try { cfg.openforreading(); s = cfg.readopenfile(i); cfg.close(); }
         catch (e) { console.log("GTDash: read line " + i + " failed (" + e + ")"); }
         return s;
+    }
+    // Resolve cfgPath to the directory that exists on this unit (see cfgCandidates).
+    // Prefer a candidate that already holds a readable config; otherwise pick the
+    // first whose directory accepts a write (the write only sticks where the dir
+    // exists). Runs once at startup, before loadConfig.
+    function resolveCfgPath() {
+        var i, s;
+        for (i = 0; i < root.cfgCandidates.length; i++) {
+            root.cfgPath = root.cfgCandidates[i];
+            s = rline(0);
+            if (s !== "" && s !== undefined && s !== null) return;   // existing config here
+        }
+        for (i = 0; i < root.cfgCandidates.length; i++) {
+            root.cfgPath = root.cfgCandidates[i];
+            saveConfig();                                            // seed defaults
+            s = rline(0);
+            if (s !== "" && s !== undefined && s !== null) return;   // write stuck -> dir exists
+        }
+        root.cfgPath = root.cfgCandidates[root.cfgCandidates.length - 1];   // fallback
     }
     function loadConfig() {
         function pI(s, def) { return (s !== "" && s !== undefined && s !== null) ? parseInt(s)   : def; }
@@ -835,6 +1125,9 @@ Item {
         root.afrLow       = pF(rline(23),  root.afrLow);
         root.nightlight   = pI(rline(24),  root.nightlight);
         root.afrSource    = pI(rline(25),  root.afrSource);
+        root.placementSwap= pI(rline(26),  root.placementSwap ? 1 : 0) !== 0;
+        root.hideTachNums = pI(rline(27),  root.hideTachNums ? 1 : 0) !== 0;
+        root.hideShiftLights = pI(rline(28), root.hideShiftLights ? 1 : 0) !== 0;
         return found;
     }
     function saveConfig() {
@@ -846,7 +1139,8 @@ Item {
                         root.oilPressHigh.toFixed(1), root.oilPressLow.toFixed(1), root.oilPressUnits,
                         root.batteryHigh.toFixed(1), root.batteryLow.toFixed(1),
                         root.afrHigh.toFixed(2), root.afrLow.toFixed(2), root.nightlight,
-                        root.afrSource];
+                        root.afrSource, (root.placementSwap ? 1 : 0), (root.hideTachNums ? 1 : 0),
+                        (root.hideShiftLights ? 1 : 0)];
             // Write the whole file in a SINGLE writetoopenfile() call (verified
             // to round-trip with the per-line reader above).
             var out = "";
@@ -859,9 +1153,15 @@ Item {
     // First run: if no config is found, write the current defaults so the file
     // exists (FileIO does not create it on a read).
     Component.onCompleted: {
+        // Tell the host firmware that warnings are handled locally, so it does
+        // NOT draw its own warning-light bar over the dash. Hardware-only flag
+        // (the property is absent in the desktop sim), so the write is guarded.
+        if (root.d) { try { root.d.DISABLE_WARNING_OVERLAY = "YES_WARNINGS_HANDLED_LOCALLY"; } catch (e) {} }
+        resolveCfgPath();        // pick /opt/Garw_IC7 vs /opt/IC7 (whichever exists on this unit)
         if (!loadConfig())
             saveConfig();
         fuelDisplay = fuel;   // start the damped bar at the live level (no boot sweep)
+        oilPressShown = oilpress;   // start oil pressure at live (boot self-test owns the boot sweep)
         bootSweep.start();    // power-on self-test sweep
     }
 
@@ -914,10 +1214,13 @@ Item {
         { k: "alo",    label: "AFR LOW" },
         { k: "asrc",   label: "AFR SOURCE" },
         { k: "night",  label: "NIGHTLIGHT" },
+        { k: "swap",   label: "RPM/SPEED SWAP" },
+        { k: "htn",    label: "HIDE TACH NUMS" },
+        { k: "hsl",    label: "HIDE SHIFT LIGHTS" },
         { k: "exit",   label: "EXIT" }
     ]
     // toggles + exit aren't hold-to-ramp; everything else is.
-    readonly property var noRamp: ["speed", "dist", "cun", "otun", "opun", "asrc", "exit"]
+    readonly property var noRamp: ["speed", "dist", "cun", "otun", "opun", "asrc", "swap", "htn", "hsl", "exit"]
     function isRampable(k) { return noRamp.indexOf(k) === -1; }
 
     function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
@@ -942,7 +1245,7 @@ Item {
         case "fdmp":   root.fuelDamp     = clamp(root.fuelDamp + dir, 0, 9);   break;
         case "othi":   root.oilTempHigh  = clamp(root.oilTempHigh + dir * (root.oilTempUnits === 1 ? 5/9 : 1), 0, 250); break;
         case "otlo":   root.oilTempLow   = clamp(root.oilTempLow  + dir * (root.oilTempUnits === 1 ? 5/9 : 1), 0, 250); break;
-        case "otun":   root.oilTempUnits = ((root.oilTempUnits + dir) % 3 + 3) % 3; break;
+        case "otun":   root.oilTempUnits = ((root.oilTempUnits + dir) % 4 + 4) % 4; break;
         case "ophi":   root.oilPressHigh = clamp(root.oilPressHigh + dir * (root.oilPressUnits === 1 ? 1.45038 : 1), 0, 200); break;
         case "oplo":   root.oilPressLow  = clamp(root.oilPressLow  + dir * (root.oilPressUnits === 1 ? 1.45038 : 1), 0, 200); break;
         case "opun":   root.oilPressUnits= ((root.oilPressUnits + dir) % 3 + 3) % 3; break;
@@ -952,6 +1255,9 @@ Item {
         case "alo":    root.afrLow       = clamp(root.afrLow  + dir * (root.afrSource === 0 ? 0.1/14.7 : 0.01), 0.5, 1.5); break;
         case "asrc":   root.afrSource    = ((root.afrSource + dir) % 3 + 3) % 3; break;
         case "night":  root.nightlight   = clamp(root.nightlight + dir * 5, 0, 100); break;
+        case "swap":   root.placementSwap = !root.placementSwap; break;
+        case "htn":    root.hideTachNums  = !root.hideTachNums;  break;
+        case "hsl":    root.hideShiftLights = !root.hideShiftLights; break;
         case "exit":   if (dir > 0) { saveConfig(); closeMenu(); return; } break;
         }
         root.settingsRev += 1;          // triggers the ListView value cells to re-read
@@ -976,7 +1282,7 @@ Item {
         case "fdmp":   return String(root.fuelDamp);
         case "othi":   return (root.oilTempUnits === 1 ? Math.round(root.oilTempHigh * 9/5 + 32) : Math.round(root.oilTempHigh)) + "\u00B0";
         case "otlo":   return (root.oilTempUnits === 1 ? Math.round(root.oilTempLow  * 9/5 + 32) : Math.round(root.oilTempLow))  + "\u00B0";
-        case "otun":   return root.oilTempUnits === 0 ? "\u00B0C" : root.oilTempUnits === 1 ? "\u00B0F" : "OFF";
+        case "otun":   return root.oilTempUnits === 0 ? "\u00B0C" : root.oilTempUnits === 1 ? "\u00B0F" : root.oilTempUnits === 2 ? "OFF" : "PEAK";
         case "ophi":   return root.oilPressUnits === 1 ? (root.oilPressHigh / 14.5038).toFixed(1) : String(Math.round(root.oilPressHigh));
         case "oplo":   return root.oilPressUnits === 1 ? (root.oilPressLow  / 14.5038).toFixed(1) : String(Math.round(root.oilPressLow));
         case "opun":   return root.oilPressUnits === 0 ? "PSI" : root.oilPressUnits === 1 ? "BAR" : "OFF";
@@ -986,6 +1292,9 @@ Item {
         case "alo":    return root.afrSource === 0 ? (root.afrLow  * 14.7).toFixed(1) : root.afrLow.toFixed(2)  + "\u03BB";
         case "asrc":   return root.afrSource === 0 ? "AFR" : root.afrSource === 1 ? "LAMBDA" : "OFF";
         case "night":  return root.nightlight === 0 ? "OFF" : String(root.nightlight);
+        case "swap":   return root.placementSwap ? "TRUE" : "FALSE";
+        case "htn":    return root.hideTachNums  ? "TRUE" : "FALSE";
+        case "hsl":    return root.hideShiftLights ? "TRUE" : "FALSE";
         case "exit":   return "SAVE";
         }
         return "";
@@ -1021,8 +1330,8 @@ Item {
         interval: 50; running: true; repeat: true
         onTriggered: root.evalEdges()
     }
-    Timer {   // hold-to-ramp for numeric rows
-        interval: 90; running: true; repeat: true
+    Timer {   // hold-to-ramp for numeric rows (only runs while the menu is open)
+        interval: 90; running: root.menuOpen; repeat: true
         onTriggered: {
             if (root.menuOpen && root.isRampable(root.items[root.sel].k)) {
                 // upArmed/downArmed gate the ramp until the button is released
