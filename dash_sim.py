@@ -28,7 +28,7 @@ from PySide6.QtQml import qmlRegisterType
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QGridLayout,
     QLabel, QSlider, QCheckBox, QComboBox, QPushButton, QGroupBox, QScrollArea,
-    QSizePolicy, QFrame, QLineEdit,
+    QSizePolicy, QFrame, QLineEdit, QMessageBox,
 )
 from PySide6.QtQuickWidgets import QQuickWidget
 
@@ -688,6 +688,65 @@ class MainWindow(QMainWindow):
         if self.stage is not None:
             self.stage.setProperty("dashSource", url)
         self.note.setText(meta.get("notes", ""))
+        # Warn if the dash's QML uses ES6 'let' declarations, which the IC7's
+        # QML/JS engine (Qt 5.12 QV4) does not support.
+        hits = self._scan_for_let(meta["dir"])
+        if hits:
+            self._warn_unsupported_js(hits)
+
+    # ---- IC7 compatibility checks --------------------------------------
+    def _scan_for_let(self, dash_dir):
+        """Find ES6 'let' declarations in the dash's QML files. Returns a list
+        of (relative_path, line_number, line_text). Skips line comments and
+        matches inside string literals to avoid false positives."""
+        import re
+        pat = re.compile(r"\blet\s+[A-Za-z_$\[{]")
+        hits = []
+        for root_, _dirs, files in os.walk(dash_dir):
+            for fn in files:
+                if not fn.lower().endswith(".qml"):
+                    continue
+                fp = os.path.join(root_, fn)
+                try:
+                    with open(fp, "r", encoding="utf-8", errors="replace") as fh:
+                        for n, line in enumerate(fh, 1):
+                            code = line.split("//", 1)[0]      # drop line comments
+                            for m in pat.finditer(code):
+                                before = code[:m.start()]
+                                # crude: inside a string if an odd number of
+                                # unescaped quotes precede the match
+                                dq = before.count('"') - before.count('\\"')
+                                sq = before.count("'") - before.count("\\'")
+                                if dq % 2 == 0 and sq % 2 == 0:
+                                    hits.append((os.path.relpath(fp, dash_dir),
+                                                 n, line.strip()))
+                                    break
+                except OSError:
+                    pass
+        return hits
+
+    def _warn_unsupported_js(self, hits):
+        msg = ("This code is using 'let' instead of 'var' declarations which is "
+               "unsupported on the IC7 hardware. Please update the code to use "
+               "'var' declarations.")
+        sys.stderr.write("\n[IC7 compatibility] " + msg + "\n")
+        for rel, ln, text in hits:
+            sys.stderr.write("    %s:%d   %s\n" % (rel, ln, text))
+        sys.stderr.flush()
+        detail = "\n".join("%s : line %d\n    %s" % (rel, ln, text)
+                           for rel, ln, text in hits)
+        box = getattr(self, "_js_warn_box", None)
+        if box is not None:
+            box.close()
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Unsupported QML/JS on IC7")
+        box.setText(msg)
+        box.setDetailedText(detail)
+        box.setStandardButtons(QMessageBox.Ok)
+        box.setModal(False)
+        box.show()
+        self._js_warn_box = box
 
     # ---- control panel widgets -----------------------------------------
     def _build_panel(self):
