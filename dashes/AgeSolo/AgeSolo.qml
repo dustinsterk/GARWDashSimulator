@@ -416,15 +416,15 @@ Item {
         // Calculate shadow offset based on needle angle
         // Light source is at top (0 degrees)
         function calculateShadowOffset() {
-            let angle = watertemp_rotate.angle
-            let shadowDistance = 4  // slightly smaller for water temp needle
+            var angle = watertemp_rotate.angle
+            var shadowDistance = 4  // slightly smaller for water temp needle
             
             // Convert angle to radians
-            let rad = (angle * Math.PI) / 180
+            var rad = (angle * Math.PI) / 180
             
             // Calculate x and y offset based on angle
-            let offsetX = Math.sin(rad) * shadowDistance
-            let offsetY = Math.cos(rad) * shadowDistance
+            var offsetX = Math.sin(rad) * shadowDistance
+            var offsetY = Math.cos(rad) * shadowDistance
             
             return { x: offsetX, y: offsetY }
         }
@@ -497,16 +497,16 @@ Item {
         // Calculate shadow offset based on needle angle
         // Light source is at top (0 degrees)
         function calculateShadowOffset() {
-            let angle = tachneedle_rotate.angle
-            let shadowDistance = 8  // how far the shadow extends
+            var angle = tachneedle_rotate.angle
+            var shadowDistance = 8  // how far the shadow extends
             
             // Convert angle to radians
-            let rad = (angle * Math.PI) / 180
+            var rad = (angle * Math.PI) / 180
             
             // Calculate x and y offset based on angle
             // Since light is at top, shadow points opposite direction
-            let offsetX = Math.sin(rad) * shadowDistance
-            let offsetY = Math.cos(rad) * shadowDistance
+            var offsetX = Math.sin(rad) * shadowDistance
+            var offsetY = Math.cos(rad) * shadowDistance
             
             return { x: offsetX, y: offsetY }
         }
