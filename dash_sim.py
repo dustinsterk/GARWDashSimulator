@@ -422,7 +422,8 @@ class SliderRow(QWidget):
         self.unit = unit
         self.on_change = on_change
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(0, 2, 0, 2)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
         self.name = QLabel(label)
         self.name.setMinimumWidth(120)
         self.slider = QSlider(Qt.Horizontal)
@@ -762,6 +763,7 @@ class MainWindow(QMainWindow):
         panel.setFixedWidth(PANEL_W)          # fixed, not max: nothing renegotiates
         outer = QVBoxLayout(panel)
         outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(4)
 
         # dash selector + demo toggle
         top = QHBoxLayout()
@@ -827,6 +829,8 @@ class MainWindow(QMainWindow):
         # --- analog group ---
         g_an = QGroupBox("Analog signals")
         gv = QVBoxLayout(g_an)
+        gv.setSpacing(2)
+        gv.setContentsMargins(8, 4, 8, 4)
         self.rpm   = SliderRow("RPM", 0, 10000, 900, scale=5, unit="rpm",
                                on_change=lambda x: self.data.set("rpmdata", x))
         self.speed = SliderRow("Speed", 0, 320, 0, scale=1, unit="km/h",
@@ -866,6 +870,7 @@ class MainWindow(QMainWindow):
         # --- inputs group ---
         g_in = QGroupBox("Inputs  (inputsdata bit flags)")
         ig = QGridLayout(g_in)
+        ig.setContentsMargins(8, 4, 8, 4)
         ig.setHorizontalSpacing(6)
         ig.setVerticalSpacing(2)
         self.input_boxes = {}
@@ -929,6 +934,8 @@ class MainWindow(QMainWindow):
         # --- odometer / trip ---
         g_od = QGroupBox("Odometer / trip")
         ov = QVBoxLayout(g_od)
+        ov.setSpacing(2)
+        ov.setContentsMargins(8, 4, 8, 4)
         self.odo  = SliderRow("Odometer", 0, 200000, 42000, scale=100, unit="",
                               on_change=lambda x: self.data.set("odometer0data", int(x)))
         self.trip = SliderRow("Trip", 0, 9999, 123, scale=1, unit="",
