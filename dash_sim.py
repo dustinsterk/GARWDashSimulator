@@ -688,19 +688,25 @@ class MainWindow(QMainWindow):
         if self.stage is not None:
             self.stage.setProperty("dashSource", url)
         self.note.setText(meta.get("notes", ""))
-        # Warn if the dash's QML uses ES6 'let' declarations, which the IC7's
-        # QML/JS engine (Qt 5.12 QV4) does not support.
+        # Warn if the dash's QML uses ES6 'let'/'const' declarations, which the
+        # IC7's QML/JS engine (Qt 5.12 QV4) does not support.
         hits = self._scan_for_let(meta["dir"])
         if hits:
-            self._warn_unsupported_js(hits)
+            if self.isVisible():
+                self._warn_unsupported_js(hits)
+            else:
+                # Startup: the window isn't shown and the event loop isn't
+                # running yet, so a popup created now never appears. Defer it
+                # until the loop starts.
+                QTimer.singleShot(0, lambda h=hits: self._warn_unsupported_js(h))
 
     # ---- IC7 compatibility checks --------------------------------------
     def _scan_for_let(self, dash_dir):
-        """Find ES6 'let' declarations in the dash's QML files. Returns a list
-        of (relative_path, line_number, line_text). Skips line comments and
-        matches inside string literals to avoid false positives."""
+        """Find ES6 'let'/'const' declarations in the dash's QML files. Returns a
+        list of (relative_path, line_number, keyword, line_text). Skips line
+        comments and matches inside string literals to avoid false positives."""
         import re
-        pat = re.compile(r"\blet\s+[A-Za-z_$\[{]")
+        pat = re.compile(r"\b(let|const)\s+[A-Za-z_$\[{]")
         hits = []
         for root_, _dirs, files in os.walk(dash_dir):
             for fn in files:
@@ -719,22 +725,23 @@ class MainWindow(QMainWindow):
                                 sq = before.count("'") - before.count("\\'")
                                 if dq % 2 == 0 and sq % 2 == 0:
                                     hits.append((os.path.relpath(fp, dash_dir),
-                                                 n, line.strip()))
-                                    break
+                                                 n, m.group(1), line.strip()))
                 except OSError:
                     pass
         return hits
 
     def _warn_unsupported_js(self, hits):
-        msg = ("This code is using 'let' instead of 'var' declarations which is "
+        kinds = sorted({kw for _rel, _ln, kw, _text in hits})
+        quoted = " and ".join("'%s'" % k for k in kinds)   # 'const' / 'let' and 'const'
+        msg = ("This code is using %s instead of var declarations which is "
                "unsupported on the IC7 hardware. Please update the code to use "
-               "'var' declarations.")
+               "'var' declarations." % quoted)
         sys.stderr.write("\n[IC7 compatibility] " + msg + "\n")
-        for rel, ln, text in hits:
-            sys.stderr.write("    %s:%d   %s\n" % (rel, ln, text))
+        for rel, ln, kw, text in hits:
+            sys.stderr.write("    %s:%d   (%s)  %s\n" % (rel, ln, kw, text))
         sys.stderr.flush()
-        detail = "\n".join("%s : line %d\n    %s" % (rel, ln, text)
-                           for rel, ln, text in hits)
+        detail = "\n".join("%s : line %d  (%s)\n    %s" % (rel, ln, kw, text)
+                           for rel, ln, kw, text in hits)
         box = getattr(self, "_js_warn_box", None)
         if box is not None:
             box.close()
@@ -768,22 +775,28 @@ class MainWindow(QMainWindow):
         top.addWidget(self.demo_btn)
         outer.addLayout(top)
 
-        # demo speed (0.25x .. 4x), shown only while the demo is running
-        self.demo_speed = 1.0
+        # demo speed (0 .. 2x) with a perceptual (quadratic) response: the slow
+        # end gets most of the slider travel (fine control), so the 0.15x default
+        # sits at a natural position rather than jammed against the left. 2x is
+        # still reachable at the far right.
+        self.DEMO_SPEED_MAX = 2.0
+        self.demo_speed = 0.15
         self.demo_speed_row = QWidget()
         sp = QHBoxLayout(self.demo_speed_row)
         sp.setContentsMargins(0, 0, 0, 0)
         sp.addWidget(QLabel("Demo speed"))
         self.demo_speed_slider = QSlider(Qt.Horizontal)
-        self.demo_speed_slider.setMinimum(25)     # 0.25x
-        self.demo_speed_slider.setMaximum(400)    # 4.00x
-        self.demo_speed_slider.setValue(100)      # 1.00x
-        self.demo_speed_lbl = QLabel("1\u00d7")
-        self.demo_speed_lbl.setFixedWidth(42)
+        self.demo_speed_slider.setMinimum(0)
+        self.demo_speed_slider.setMaximum(1000)
+        self.demo_speed_slider.setSingleStep(5)
+        self.demo_speed_slider.setPageStep(25)
+        self.demo_speed_slider.setValue(self._demo_speed_to_pos(0.15))
+        self.demo_speed_lbl = QLabel("0.15\u00d7")
+        self.demo_speed_lbl.setFixedWidth(46)
         self.demo_speed_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
-        def _on_demo_speed(v):
-            self.demo_speed = v / 100.0
+        def _on_demo_speed(pos):
+            self.demo_speed = round(self.DEMO_SPEED_MAX * (pos / 1000.0) ** 2, 3)
             self.demo_speed_lbl.setText(("%g" % self.demo_speed) + "\u00d7")
         self.demo_speed_slider.valueChanged.connect(_on_demo_speed)
         sp.addWidget(self.demo_speed_slider, 1)
@@ -992,6 +1005,12 @@ class MainWindow(QMainWindow):
         self.data.set("tripmileage0data", int(self.trip.real_value()) * 10)
 
     # ---- demo loop -----------------------------------------------------
+    def _demo_speed_to_pos(self, speed):
+        """Slider position (0..1000) for a given speed, inverting the quadratic
+        response used by the demo-speed slider."""
+        import math
+        return int(round(1000 * math.sqrt(max(0.0, speed) / self.DEMO_SPEED_MAX)))
+
     def _toggle_demo(self, on):
         self.demo_speed_row.setVisible(on)
         for w in self.analog_rows:
@@ -1001,6 +1020,8 @@ class MainWindow(QMainWindow):
         if on:
             # ensure engine is "on" for the show
             self.input_boxes[0x01].setChecked(True)
+            # start at the default 0.15x playback speed
+            self.demo_speed_slider.setValue(self._demo_speed_to_pos(0.15))
             # start the odometer/trip accumulators from their current values
             self._demo_odo  = float(self.data._v["odometer0data"])
             self._demo_trip = float(self.data._v["tripmileage0data"])
