@@ -12,14 +12,12 @@
 **Windows environments:**
 * python -m pip install PySide6
 
-
-**If using the QT5 simulator file (if you want to render shaders inline)
+**If using the QT5 simulator file (if you want to render shaders inline)**
 **OSX environments:**
 * brew install pyqt@5
 
 **Windows environments:**
 * python -m pip install PyQt5
-
 
 **Run the simulator via terminal with these commands (so you can see errors in the output too):**
 * python3 dash_sim.py (OSX) OR python3 dash_sim_qt5.py (OSX)
