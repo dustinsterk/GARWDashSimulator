@@ -12,9 +12,20 @@
 **Windows environments:**
 * python -m pip install PySide6
 
+
+**If using the QT5 simulator file (if you want to render shaders inline)
+**OSX environments:**
+* brew install pyqt@5
+
+**Windows environments:**
+* python -m pip install PyQt5
+
+
 **Run the simulator via terminal with these commands (so you can see errors in the output too):**
-* python3 dash_sim.py (OSX)
-* python dash_sim.py  (Windows)
+* python3 dash_sim.py (OSX) OR python3 dash_sim_qt5.py (OSX)
+* python dash_sim.py  (Windows) OR python dash_sim_qt5.py (Windows)
 
 * * Add new dashed by adding the files into the 'dashes' folder (you may need to restart the sim to see them).
 * * All settings are saved to the local "screen_configs" folder even when there is a hardcoded path when on device for easy use/testing.
+
+
