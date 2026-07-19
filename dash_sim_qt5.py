@@ -27,6 +27,12 @@ import sys
 import json
 import glob
 
+# Allow dashes to read local files via XMLHttpRequest (some shader/data-driven
+# screens do this). Qt disables local-file XHR unless QML_XHR_ALLOW_FILE_READ is
+# set BEFORE the QML engine is created. Setting it at import time -- before Qt is
+# imported and before any entry point -- guarantees it always takes effect.
+os.environ.setdefault("QML_XHR_ALLOW_FILE_READ", "1")
+
 # --- Qt binding shim ---------------------------------------------------------
 # This is the Qt 5 build. It prefers PyQt5 (Qt 5.15), which -- unlike the Qt 6
 # PySide6 build -- renders Qt 5-style inline-GLSL ShaderEffects and has a native
@@ -1311,10 +1317,7 @@ def _qt_message_filter(mode, ctx, msg):
 
 def main():
     qInstallMessageHandler(_qt_message_filter)
-    # Allow dashes to read local files via XMLHttpRequest (some shader-based
-    # screens load their .frag/.vert or data files this way). Qt blocks local
-    # file XHR unless this is set before the QML engine starts.
-    os.environ.setdefault("QML_XHR_ALLOW_FILE_READ", "1")
+    # QML_XHR_ALLOW_FILE_READ is set at import time (top of this file).
     # Qt picks the native scene-graph backend per OS (Metal on macOS, D3D on
     # Windows, OpenGL on Linux). If a machine has flaky GPU drivers, set the
     # env var QT_QUICK_BACKEND=software before launching (see README).

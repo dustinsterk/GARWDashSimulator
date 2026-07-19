@@ -21,6 +21,12 @@ import sys
 import json
 import glob
 
+# Allow dashes to read local files via XMLHttpRequest (some shader/data-driven
+# screens do this). Qt disables local-file XHR unless QML_XHR_ALLOW_FILE_READ is
+# set BEFORE the QML engine is created. Setting it at import time -- before Qt is
+# imported and before any entry point -- guarantees it always takes effect.
+os.environ.setdefault("QML_XHR_ALLOW_FILE_READ", "1")
+
 from PySide6.QtCore import (Qt, QObject, Property, Signal, Slot, QUrl, QTimer,
                             QEvent, qInstallMessageHandler, QtMsgType)
 from PySide6.QtGui import QFont, QKeyEvent
@@ -700,6 +706,14 @@ class MainWindow(QMainWindow):
                 # running yet, so a popup created now never appears. Defer it
                 # until the loop starts.
                 QTimer.singleShot(0, lambda h=hits: self._warn_unsupported_js(h))
+        # Warn if the dash uses Qt 5-style inline GLSL shaders, which this Qt 6
+        # simulator can't render (the car's Qt 5.12 can).
+        shader_hits = self._scan_for_inline_shaders(meta["dir"])
+        if shader_hits:
+            if self.isVisible():
+                self._warn_inline_shaders(shader_hits)
+            else:
+                QTimer.singleShot(0, lambda h=shader_hits: self._warn_inline_shaders(h))
 
     # ---- IC7 compatibility checks --------------------------------------
     def _scan_for_let(self, dash_dir):
@@ -755,6 +769,64 @@ class MainWindow(QMainWindow):
         box.setModal(False)
         box.show()
         self._js_warn_box = box
+
+    def _scan_for_inline_shaders(self, dash_dir):
+        """Detect Qt 5-style inline GLSL ShaderEffects. Qt 6 (this simulator)
+        can't render those -- it needs shaders precompiled to .qsb -- while the
+        car's Qt 5.12 renders them fine. Returns [(relative_path, line_no)]."""
+        hits = []
+        for root_, _dirs, files in os.walk(dash_dir):
+            for fn in files:
+                if not fn.lower().endswith(".qml"):
+                    continue
+                fp = os.path.join(root_, fn)
+                try:
+                    with open(fp, "r", encoding="utf-8", errors="replace") as fh:
+                        text = fh.read()
+                except OSError:
+                    continue
+                if "ShaderEffect" not in text:
+                    continue
+                # Qt 6 assigns a .qsb URL to fragmentShader/vertexShader; Qt 5
+                # assigns inline GLSL source. Inline GLSL (no .qsb) = unsupported.
+                looks_glsl = any(k in text for k in (
+                    "gl_FragColor", "qt_TexCoord0", "void main", "varying ",
+                    "uniform lowp", "uniform highp", "uniform mediump"))
+                if looks_glsl and ".qsb" not in text:
+                    ln = 0
+                    for n, line in enumerate(text.splitlines(), 1):
+                        if "fragmentShader:" in line or "vertexShader:" in line:
+                            ln = n
+                            break
+                    hits.append((os.path.relpath(fp, dash_dir), ln))
+        return hits
+
+    def _warn_inline_shaders(self, hits):
+        msg = ("This dash uses inline GLSL shaders (Qt 5 style). The IC7 hardware "
+               "(Qt 5.12) renders these, but this simulator runs on Qt 6, which "
+               "requires shaders precompiled to .qsb -- so the ShaderEffect "
+               "elements won't appear here.\n\n"
+               "To preview this dash with its shaders, run the Qt 5 build "
+               "instead:  python dash_sim_qt5.py\n\n"
+               "The rest of the dash still renders normally in this build.")
+        sys.stderr.write("\n[IC7 compatibility] " + msg + "\n")
+        for rel, ln in hits:
+            sys.stderr.write("    %s%s\n" % (rel, (":%d" % ln) if ln else ""))
+        sys.stderr.flush()
+        detail = "\n".join(("%s : line %d" % (rel, ln)) if ln else rel
+                           for rel, ln in hits)
+        box = getattr(self, "_shader_warn_box", None)
+        if box is not None:
+            box.close()
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Shader not supported in simulator")
+        box.setText(msg)
+        box.setDetailedText(detail)
+        box.setStandardButtons(QMessageBox.Ok)
+        box.setModal(False)
+        box.show()
+        self._shader_warn_box = box
 
     # ---- control panel widgets -----------------------------------------
     def _build_panel(self):
@@ -1194,6 +1266,16 @@ def _qt_message_filter(mode, ctx, msg):
     )
     if transient:
         return
+    # Qt 6 can't load Qt 5-style inline GLSL ShaderEffects; the dash-selection
+    # code shows a single clear popup about this, so drop the raw driver spam.
+    shader_noise = (
+        "Failed to deserialize QShader" in msg
+        or "shader preparation failed" in msg
+        or "Failed to find shader" in msg
+        or ("ShaderEffect:" in msg and "does not have a matching property" in msg)
+    )
+    if shader_noise:
+        return
     stream = sys.stderr
     stream.write(msg + "\n")
     stream.flush()
@@ -1201,6 +1283,7 @@ def _qt_message_filter(mode, ctx, msg):
 
 def main():
     qInstallMessageHandler(_qt_message_filter)
+    # QML_XHR_ALLOW_FILE_READ is set at import time (top of this file).
     # Qt picks the native scene-graph backend per OS (Metal on macOS, D3D on
     # Windows, OpenGL on Linux). If a machine has flaky GPU drivers, set the
     # env var QT_QUICK_BACKEND=software before launching (see README).
