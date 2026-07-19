@@ -771,41 +771,78 @@ class MainWindow(QMainWindow):
         self._js_warn_box = box
 
     def _scan_for_inline_shaders(self, dash_dir):
-        """Detect Qt 5-style inline GLSL ShaderEffects. Qt 6 (this simulator)
-        can't render those -- it needs shaders precompiled to .qsb -- while the
-        car's Qt 5.12 renders them fine. Returns [(relative_path, line_no)]."""
-        hits = []
+        """Detect Qt 5-style GLSL ShaderEffects -- whether the GLSL is inline in
+        the .qml or loaded at runtime from an external .frag/.vert/etc file. Qt 6
+        (this simulator) can't render these; it needs shaders precompiled to
+        .qsb. The car's Qt 5.12 renders them fine. Returns [(rel_path, line_no)].
+        If the dash ships .qsb files it's treated as Qt 6-ready (not flagged)."""
+        SRC_EXT = (".frag", ".fsh", ".fs", ".vert", ".vsh", ".vs", ".glsl", ".shader")
+        SKIP_EXT = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".svg", ".ttf",
+                    ".otf", ".woff", ".woff2", ".bin", ".json", ".md", ".py",
+                    ".qsb", ".qml", ".qmlc", ".jsc")
+        GLSL_SIG = ("gl_FragColor", "gl_Position", "qt_TexCoord0", "void main",
+                    "varying ", "uniform lowp", "uniform highp", "uniform mediump")
+        has_qsb = False
+        shader_qml = []        # (rel, lineno) for .qml with a runtime-GLSL ShaderEffect
+        external_src = []      # external GLSL source files (loaded via XHR etc.)
         for root_, _dirs, files in os.walk(dash_dir):
             for fn in files:
-                if not fn.lower().endswith(".qml"):
-                    continue
+                low = fn.lower()
                 fp = os.path.join(root_, fn)
-                try:
-                    with open(fp, "r", encoding="utf-8", errors="replace") as fh:
-                        text = fh.read()
-                except OSError:
+                rel = os.path.relpath(fp, dash_dir)
+                if low.endswith(".qsb"):
+                    has_qsb = True
                     continue
-                if "ShaderEffect" not in text:
-                    continue
-                # Qt 6 assigns a .qsb URL to fragmentShader/vertexShader; Qt 5
-                # assigns inline GLSL source. Inline GLSL (no .qsb) = unsupported.
-                looks_glsl = any(k in text for k in (
-                    "gl_FragColor", "qt_TexCoord0", "void main", "varying ",
-                    "uniform lowp", "uniform highp", "uniform mediump"))
-                if looks_glsl and ".qsb" not in text:
+                if low.endswith(".qml"):
+                    try:
+                        text = open(fp, "r", encoding="utf-8", errors="replace").read()
+                    except OSError:
+                        continue
+                    # Only a ShaderEffect that assigns a custom shader matters;
+                    # one pointing at a .qsb is already Qt 6-style.
+                    if "ShaderEffect" not in text:
+                        continue
+                    if "fragmentShader" not in text and "vertexShader" not in text:
+                        continue
+                    if ".qsb" in text:
+                        continue
                     ln = 0
                     for n, line in enumerate(text.splitlines(), 1):
-                        if "fragmentShader:" in line or "vertexShader:" in line:
+                        if "fragmentShader" in line or "vertexShader" in line:
                             ln = n
                             break
-                    hits.append((os.path.relpath(fp, dash_dir), ln))
+                    if ln == 0:
+                        for n, line in enumerate(text.splitlines(), 1):
+                            if "ShaderEffect" in line:
+                                ln = n
+                                break
+                    shader_qml.append((rel, ln))
+                elif low.endswith(SRC_EXT):
+                    external_src.append(rel)
+                elif not low.endswith(SKIP_EXT):
+                    # content-sniff oddly-named/extension-less shader source files
+                    try:
+                        if os.path.getsize(fp) < 200000:
+                            head = open(fp, "r", encoding="utf-8", errors="replace").read()
+                            if any(s in head for s in GLSL_SIG):
+                                external_src.append(rel)
+                    except OSError:
+                        pass
+        if has_qsb:
+            return []          # ships precompiled shaders -> assume Qt 6-ready
+        hits = list(shader_qml)
+        # ShaderEffect present but GLSL lives in external file(s): point at them.
+        if shader_qml and external_src:
+            for sf in external_src:
+                if (sf, 0) not in hits:
+                    hits.append((sf, 0))
         return hits
 
     def _warn_inline_shaders(self, hits):
-        msg = ("This dash uses inline GLSL shaders (Qt 5 style). The IC7 hardware "
-               "(Qt 5.12) renders these, but this simulator runs on Qt 6, which "
-               "requires shaders precompiled to .qsb -- so the ShaderEffect "
-               "elements won't appear here.\n\n"
+        msg = ("This dash uses Qt 5-style GLSL shaders (inline, or loaded from a "
+               ".frag/.vert file). The IC7 hardware (Qt 5.12) renders these, but "
+               "this simulator runs on Qt 6, which requires shaders precompiled "
+               "to .qsb -- so the ShaderEffect elements won't appear here.\n\n"
                "To preview this dash with its shaders, run the Qt 5 build "
                "instead:  python dash_sim_qt5.py\n\n"
                "The rest of the dash still renders normally in this build.")
