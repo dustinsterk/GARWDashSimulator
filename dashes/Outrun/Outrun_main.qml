@@ -344,7 +344,7 @@ Item{
 
 FileIO {
     id: config_file
-    source: "/opt/Garw_IC7/screen_configs/Meltfire_config.txt"
+    source: "/opt/Garw_IC7/screen_configs/Outrun.txt"
     onError: console.log(msg)
        }
 
@@ -787,7 +787,7 @@ FileIO {
 ////////////////////////////////////
 //////////////////////////////////
 
-SoldatMeltfire{
+Outrun{
         id: dial
         odometer:parent.odometer/10
         tripmeter:parent.tripmeter

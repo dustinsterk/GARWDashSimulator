@@ -350,6 +350,10 @@ FileIO {
 
 
     Component.onCompleted: {
+    // Tell the host firmware that warnings are handled locally so it does NOT draw its own
+    // warning-light overlay over the dash (matching GTDash). The property is absent on older
+    // firmware / the desktop sim, so the write is guarded with try/catch.
+    try { rpmtest.DISABLE_WARNING_OVERLAY = "YES_WARNINGS_HANDLED_LOCALLY"; } catch (e) {}
 
     for(counter=0;counter<26;counter++){
     config_file.openforreading()

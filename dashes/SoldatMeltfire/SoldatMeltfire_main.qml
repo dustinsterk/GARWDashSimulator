@@ -344,7 +344,7 @@ Item{
 
 FileIO {
     id: config_file
-    source: "/opt/Garw_IC7/screen_configs/Danver_config.txt"
+    source: "/opt/Garw_IC7/screen_configs/Meltfire_config.txt"
     onError: console.log(msg)
        }
 
@@ -353,6 +353,7 @@ FileIO {
 
 
     Component.onCompleted: {
+
     // Tell the host firmware that warnings are handled locally so it does NOT draw its own
     // warning-light overlay over the dash (matching GTDash). The property is absent on older
     // firmware / the desktop sim, so the write is guarded with try/catch.
@@ -791,16 +792,7 @@ FileIO {
 ////////////////////////////////////
 //////////////////////////////////
 
-
-
-
-
-
-
-
-
-
-Danver   {
+SoldatMeltfire{
         id: dial
         odometer:parent.odometer/10
         tripmeter:parent.tripmeter
