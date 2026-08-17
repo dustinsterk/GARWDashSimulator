@@ -234,7 +234,7 @@ Item {
     property real   oilpress : (oilpressure > 0) ? oilpressure : 0
     property real   oilpresskpa : oilpress * 100
     property real   oilpresspsi : oilpress * 14.503
-    property bool   oilpresswarning : (root.oil || (cranking && ((oilpressureunits === 0 && oilpresspsi < oilpressurelow) || (oilpressureunits === 1 && oilpresskpa < oilpressurelow))))
+    property bool   oilpresswarning : (root.oil || (cranking && oilpressurelow > 0 && oilpresskpa <= oilpressurelow) || (oilpressurehigh > 0 && oilpresskpa >= oilpressurehigh))   // thresholds stored canonically in kPa
 
     ////////// DISPLAY MODE CONTROL /////////////////////////////////////////
     property int    displayMode: 1 // 0 fadeIn logo, 1 dashboard (expand/run/contract), 2 fadeOut dashboard
@@ -965,15 +965,21 @@ Item {
                 }
             }
 
-            property int waterTemp: (root.watertempf)
-            onWaterTempChanged: {
-                if (root.waterwarning) {
+            // Idle (non-alarm) color: BLUE below the LOW setting (AUTO->180), WHITE in range.
+            // Bound to the live temp and the low setting so it also tracks a settings change.
+            readonly property color idleColor: (root.watertempf < (root.waterlow > 0 ? root.waterlow : 180)) ? "#00ffff" : "#e3eef6"
+            // Red flash driven off the warning flag directly (robust vs binding-evaluation order).
+            property bool waterWarn: root.waterwarning
+            onWaterWarnChanged: {
+                if (waterWarn) {
                     waterwarning_animation.restart()
                 } else {
                     waterwarning_animation.stop()
-                    color = ((root.watertempf < 180) ? "#00ffff" : "#e3eef6")
+                    color = idleColor
                 }
             }
+            onIdleColorChanged: if (!waterWarn) color = idleColor
+            Component.onCompleted: { if (waterWarn) waterwarning_animation.restart(); else color = idleColor }
         }
 
         Text {
@@ -1209,15 +1215,18 @@ Item {
                 }
             }
 
-            property int oilTemp: (root.oiltempf)
-            onOilTempChanged: {
-                if (root.oiltempwarning) {
+            readonly property color idleColor: (root.oiltempf < (root.oiltemplow > 0 ? root.oiltemplow : 180)) ? "#00ffff" : "#e3eef6"
+            property bool oilTempWarn: root.oiltempwarning
+            onOilTempWarnChanged: {
+                if (oilTempWarn) {
                     oilwarning_animation.restart()
                 } else {
                     oilwarning_animation.stop()
-                    color = ((root.oiltempf < 180) ? "#00ffff" : "#e3eef6")
+                    color = idleColor
                 }
             }
+            onIdleColorChanged: if (!oilTempWarn) color = idleColor
+            Component.onCompleted: { if (oilTempWarn) oilwarning_animation.restart(); else color = idleColor }
         }
 
         Text {
@@ -1325,6 +1334,7 @@ Item {
         }
 
         Rectangle {
+            id: oil_pressure_rect
             x: (340 + root.gaugemax) - root.gaugeoffset
             y: if (root.oilpressureunits !== 0) {
                     if (root.oilpresskpa > 800)
@@ -1345,11 +1355,47 @@ Item {
             z: -50
             width: 86
             height: 429 - y
-            color: (root.oilpresswarning) ? "red" : "#e3eef6"
+            color: "#e3eef6"
             radius: 0
             border.width: 0
             visible: root.gaugevisibility
             opacity: root.gaugeopacity
+
+            SequentialAnimation {
+                id: oilpreswarning_animation
+                loops: Animation.Infinite
+                running: false
+
+                PropertyAnimation {
+                    target: oil_pressure_rect
+                    property: "color"
+                    from: "red"
+                    to: "#3f0000"
+                    duration: 250
+                }
+
+                PropertyAnimation {
+                    target: oil_pressure_rect
+                    property: "color"
+                    from: "#3f0000"
+                    to: "red"
+                    duration: 125
+                }
+            }
+
+            // Drive the flash directly off the warning flag so it fires exactly when the
+            // warning toggles (robust against binding-evaluation order, and it also reacts
+            // to a threshold change in settings, not only to a live-value change).
+            property bool oilPressWarn: root.oilpresswarning
+            onOilPressWarnChanged: {
+                if (oilPressWarn) {
+                    oilpreswarning_animation.restart()
+                } else {
+                    oilpreswarning_animation.stop()
+                    color = "#e3eef6"
+                }
+            }
+            Component.onCompleted: if (oilPressWarn) oilpreswarning_animation.restart()
         }
 
         Text {
@@ -1360,7 +1406,7 @@ Item {
             width: 15
             height: 33
             color: (root.gaugeopen >= root.gaugemax && root.oilpresswarning) ? "red" : "#dfdfdf"
-            text: (root.oilpressureunits !== 0) ? root.oilpresskpa.toFixed(0) + " kPa" : root.oilpresspsi.toFixed(0) + " psi"
+            text: root.oilpressureunits === 1 ? root.oilpress.toFixed(1) + " BAR" : root.oilpressureunits === 2 ? root.oilpresskpa.toFixed(0) + " kPa" : root.oilpresspsi.toFixed(0) + " psi"
             style: Text.Outline
             horizontalAlignment: Text.AlignHCenter
             font.family: gauge_font.name
@@ -1378,7 +1424,7 @@ Item {
             width: 15
             height: 33
             color: "#dfdfdf"
-            text: (root.oilpressureunits !== 0) ? "800" : "100"
+            text: root.oilpressureunits === 1 ? "8" : root.oilpressureunits === 2 ? "800" : "100"
             style: Text.Outline
             horizontalAlignment: Text.AlignRight
             font.family: gauge_font.name
@@ -1396,7 +1442,7 @@ Item {
             width: 15
             height: 33
             color: "#dfdfdf"
-            text: (root.oilpressureunits !== 0) ? "400" : "50"
+            text: root.oilpressureunits === 1 ? "4" : root.oilpressureunits === 2 ? "400" : "50"
             style: Text.Outline
             horizontalAlignment: Text.AlignRight
             font.family: gauge_font.name
@@ -1584,6 +1630,40 @@ Item {
     readonly property var noRamp: ["wun","otun","opun","speed","rdamp","fdmp","night","wicon","logo","exit"]
     function isRampable(k) { return noRamp.indexOf(k) === -1; }
     function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+    // --- temperature unit helpers -------------------------------------------
+    // Coolant / oil-temp thresholds are stored internally in °F (warnings compare in
+    // °F and the config persists °F), so the physical threshold never changes when the
+    // display unit flips. These make the MENU row temp-aware: show and step the value in
+    // whichever unit is selected. 0 stays the "use built-in default" sentinel.
+    function f2c(f) { return (f - 32) * 5 / 9; }
+    function c2f(c) { return c * 9 / 5 + 32; }
+    function tempDisp(fval, isC) {
+        if (fval === 0) return "0\u00B0";                                     // 0 = default / auto
+        return (isC ? Math.round(f2c(fval)) : Math.round(fval)) + (isC ? "\u00B0C" : "\u00B0F");
+    }
+    function tempStep(fval, dir, isC) {
+        if (!isC) return clamp(fval + dir, 0, 300);                            // step in °F
+        var c = (fval === 0) ? 0 : Math.round(f2c(fval));                      // step in °C ...
+        c = clamp(c + dir, 0, 150);
+        return (c === 0) ? 0 : Math.round(c2f(c));                             // ... stored back as °F
+    }
+
+    // --- oil-pressure unit helpers ------------------------------------------
+    // Native oilpressuredata is BAR. Thresholds are stored canonically in kPa; the
+    // menu shows/steps them in the selected unit (0=PSI, 1=BAR, 2=kPa) and the warning
+    // compares physically, so screen and settings always agree. 0 = disabled.
+    function kpa2psi(k) { return k * 0.145038; }
+    function psi2kpa(p) { return p * 6.894757; }
+    function pressDisp(kpaVal, u) {
+        if (u === 1) return (kpaVal / 100).toFixed(1) + " BAR";
+        if (u === 2) return Math.round(kpaVal) + " kPa";
+        return Math.round(kpa2psi(kpaVal)) + " PSI";
+    }
+    function pressStep(kpaVal, dir, u) {
+        if (u === 1) { var b = Math.round((kpaVal / 100 + dir * 0.1) * 10) / 10; return clamp(Math.round(b * 100), 0, 1400); }   // 0.1 BAR
+        if (u === 2) return clamp(kpaVal + dir * 5, 0, 1400);                                                                     // 5 kPa
+        var p = Math.round(kpa2psi(kpaVal)) + dir; return clamp(Math.round(psi2kpa(p)), 0, 1400);                                 // 1 PSI
+    }
 
     function applyValue(dir) {
         var k = items[sel].k;
@@ -1591,18 +1671,18 @@ Item {
         case "red":   root.red   = ((root.red   + dir) % 256 + 256) % 256; break;
         case "green": root.green = ((root.green + dir) % 256 + 256) % 256; break;
         case "blue":  root.blue  = ((root.blue  + dir) % 256 + 256) % 256; break;
-        case "whi":   root.waterhigh = clamp(root.waterhigh + dir, 0, 300); break;
-        case "wlo":   root.waterlow  = clamp(root.waterlow  + dir, 0, 300); break;
+        case "whi":   root.waterhigh = root.tempStep(root.waterhigh, dir, root.waterunits === 1); break;
+        case "wlo":   root.waterlow  = root.tempStep(root.waterlow,  dir, root.waterunits === 1); break;
         case "wun":   root.waterunits = (root.waterunits === 0) ? 1 : 0; break;
         case "wicon": root.fuelhigh = (root.fuelhigh == 0) ? 1 : 0; break;   // fuelhigh is the hide-icons flag: 0 = ON, !=0 = OFF
         case "logo":  root.showLogoOnStart = !root.showLogoOnStart; break;
         case "flo":   root.fuellow  = clamp(root.fuellow  + dir, 0, 100); break;
-        case "othi":  root.oiltemphigh = clamp(root.oiltemphigh + dir, 0, 300); break;
-        case "otlo":  root.oiltemplow  = clamp(root.oiltemplow  + dir, 0, 300); break;
+        case "othi":  root.oiltemphigh = root.tempStep(root.oiltemphigh, dir, root.oiltempunits === 1); break;
+        case "otlo":  root.oiltemplow  = root.tempStep(root.oiltemplow,  dir, root.oiltempunits === 1); break;
         case "otun":  root.oiltempunits = (root.oiltempunits === 0) ? 1 : 0; break;
-        case "ophi":  root.oilpressurehigh = clamp(root.oilpressurehigh + dir, 0, 200); break;
-        case "oplo":  root.oilpressurelow  = clamp(root.oilpressurelow  + dir, 0, 200); break;
-        case "opun":  root.oilpressureunits = (root.oilpressureunits === 0) ? 1 : 0; break;
+        case "ophi":  root.oilpressurehigh = root.pressStep(root.oilpressurehigh, dir, root.oilpressureunits); break;
+        case "oplo":  root.oilpressurelow  = root.pressStep(root.oilpressurelow,  dir, root.oilpressureunits); break;
+        case "opun":  root.oilpressureunits = ((root.oilpressureunits + dir) % 3 + 3) % 3; break;
         case "speed": root.speedunits = ((root.speedunits + dir) % 3 + 3) % 3; break;
         case "limit": root.rpmlimit   = ((root.rpmlimit   + dir * 100) % 9100 + 9100) % 9100; break;
         case "shift": root.shiftvalue = ((root.shiftvalue + dir * 100) % 9100 + 9100) % 9100; break;
@@ -1619,18 +1699,18 @@ Item {
         case "red":   return String(root.red);
         case "green": return String(root.green);
         case "blue":  return String(root.blue);
-        case "whi":   return Math.round(root.waterhigh) + "\u00B0";
-        case "wlo":   return Math.round(root.waterlow)  + "\u00B0";
+        case "whi":   return root.tempDisp(root.waterhigh, root.waterunits === 1);
+        case "wlo":   return root.tempDisp(root.waterlow,  root.waterunits === 1);
         case "wun":   return root.waterunits === 1 ? "\u00B0C" : "\u00B0F";
         case "wicon": return root.fuelhigh == 0 ? "ON" : "OFF";
         case "logo":  return root.showLogoOnStart ? "ON" : "OFF";
         case "flo":   return String(Math.round(root.fuellow));
-        case "othi":  return Math.round(root.oiltemphigh) + "\u00B0";
-        case "otlo":  return Math.round(root.oiltemplow)  + "\u00B0";
+        case "othi":  return root.tempDisp(root.oiltemphigh, root.oiltempunits === 1);
+        case "otlo":  return root.tempDisp(root.oiltemplow,  root.oiltempunits === 1);
         case "otun":  return root.oiltempunits === 1 ? "\u00B0C" : "\u00B0F";
-        case "ophi":  return String(Math.round(root.oilpressurehigh));
-        case "oplo":  return String(Math.round(root.oilpressurelow));
-        case "opun":  return root.oilpressureunits === 1 ? "BAR" : "PSI";
+        case "ophi":  return root.pressDisp(root.oilpressurehigh, root.oilpressureunits);
+        case "oplo":  return root.pressDisp(root.oilpressurelow,  root.oilpressureunits);
+        case "opun":  return root.oilpressureunits === 1 ? "BAR" : root.oilpressureunits === 2 ? "kPa" : "PSI";
         case "speed": return root.speedunits === 0 ? "KM/H" : "MPH";
         case "limit": return String(root.rpmlimit);
         case "shift": return String(root.shiftvalue);
