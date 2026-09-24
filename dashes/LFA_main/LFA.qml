@@ -1,1 +1,0 @@
-Temp file for GarwDashUploader file structure check.  Code in LFA_main.qml.
