@@ -70,3 +70,4 @@ load dashes, and zips it with an editable `dashes/` folder.
 Build locally: `pip install pyinstaller PySide6` then
 `pyinstaller --noconfirm packaging/GARWDashSimulator.spec`
 (for the Qt 5 version: `pip install pyinstaller PyQt5`, and set `GARW_VARIANT=qt5`).
+On macOS this also puts `Run with Terminal.command` (Qt5: `Run Qt5 with Terminal.command`) next to the `.app` in `dist/`.

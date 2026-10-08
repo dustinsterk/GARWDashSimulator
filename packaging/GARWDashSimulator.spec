@@ -130,3 +130,26 @@ if sys.platform == "darwin":
             "LSMinimumSystemVersion": "11.0",
         },
     )
+
+
+def _install_terminal_launcher():
+    """macOS: put a double-clickable "Run ... with Terminal.command" next to the
+    .app in dist/, so local builds get it too (the release zip also ships one)."""
+    template = os.path.join(SPECPATH, "Run with Terminal.command")
+    with open(template) as f:
+        text = f.read()
+    generic = 'APP="$(ls -d *.app 2>/dev/null | head -1)"'
+    if generic not in text:
+        raise SystemExit("Run with Terminal.command template changed; update the spec")
+    text = text.replace(generic, 'APP="%s.app"' % NAME)    # pin to THIS build's app
+    fname = "Run Qt5 with Terminal.command" if VARIANT == "qt5" else "Run with Terminal.command"
+    dst = os.path.join(DISTPATH, fname)
+    with open(dst, "w") as f:
+        f.write(text)
+    os.chmod(dst, 0o755)
+    print("Terminal launcher: " + dst)
+
+
+if sys.platform == "darwin":
+    _install_terminal_launcher()
+
