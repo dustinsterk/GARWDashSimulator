@@ -607,7 +607,12 @@ class MainWindow(QMainWindow):
             lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(DASHES_DIR)))
         self.statusBar().addPermanentWidget(folder_btn)
         if PATHS.mode != "source":
-            self.statusBar().showMessage("Dashes folder: " + DASHES_DIR, 8000)
+            if PATHS.mode == "documents" and PATHS.note:
+                # explain the fallback until the user does something else
+                self.statusBar().showMessage(PATHS.note, 0)
+                folder_btn.setToolTip(DASHES_DIR + "\n\n" + PATHS.note)
+            else:
+                self.statusBar().showMessage("Dashes folder: " + DASHES_DIR, 8000)
         self.dashes = self._load_dash_list()
         self.dash_combo.addItems([d["name"] for d in self.dashes])
         # Select the first dash in the list on launch.

@@ -96,7 +96,26 @@ exe = EXE(
     argv_emulation=False,
 )
 
-coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name=NAME)
+# Windows (and Linux): a second launcher that opens a console window showing
+# live output (QML errors, hot-reload messages). It shares the same _internal/
+# folder, so it only adds a few MB. macOS uses "Run with Terminal.command"
+# instead (see packaging/), since a .app can't own a console.
+extra = []
+if sys.platform != "darwin":
+    extra.append(EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        name=NAME + " Console",
+        debug=False,
+        strip=False,
+        upx=False,
+        console=True,
+        argv_emulation=False,
+    ))
+
+coll = COLLECT(exe, *extra, a.binaries, a.datas, strip=False, upx=False, name=NAME)
 
 if sys.platform == "darwin":
     app = BUNDLE(

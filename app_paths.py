@@ -37,6 +37,7 @@ class Paths(object):
         self.dashes = os.path.join(user, "dashes")
         self.configs = os.path.join(user, "screen_configs")
         self.log = os.path.join(user, LOG_NAME) if mode != "source" else None
+        self.note = ""                       # why this folder was chosen (if noteworthy)
 
     def __repr__(self):
         return "Paths(mode=%s, dashes=%s)" % (self.mode, self.dashes)
@@ -46,26 +47,91 @@ def is_frozen():
     return bool(getattr(sys, "frozen", False))
 
 
-def _exe_dir():
-    """Folder containing the executable -- or, on macOS, containing the .app."""
+def _app_bundle():
+    """On macOS, the .app containing the running executable (else None)."""
     d = os.path.dirname(os.path.abspath(sys.executable))
     tail = os.path.join("Contents", "MacOS")
     if d.endswith(os.sep + tail):
         app = d[: -len(tail) - 1]
         if app.endswith(".app"):
-            d = os.path.dirname(app)
-    return d
+            return app
+    return None
 
 
-def _writable(d):
+def _untranslocate(app_path):
+    """macOS App Translocation: an app opened while it still carries the
+    download quarantine flag is run from a randomized read-only copy
+    (/private/var/folders/.../AppTranslocation/<id>/d/X.app), so nothing next to
+    it is visible. Ask the Security framework for the original location.
+    Returns the original .app path, or None (not translocated / lookup failed)."""
+    if sys.platform != "darwin" or not app_path or "/AppTranslocation/" not in app_path:
+        return None
+    try:
+        import ctypes
+        cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        sec = ctypes.CDLL("/System/Library/Frameworks/Security.framework/Security")
+        cf.CFURLCreateFromFileSystemRepresentation.restype = ctypes.c_void_p
+        cf.CFURLCreateFromFileSystemRepresentation.argtypes = [
+            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_bool]
+        cf.CFURLGetFileSystemRepresentation.restype = ctypes.c_bool
+        cf.CFURLGetFileSystemRepresentation.argtypes = [
+            ctypes.c_void_p, ctypes.c_bool, ctypes.c_char_p, ctypes.c_long]
+        cf.CFRelease.argtypes = [ctypes.c_void_p]
+        fn = sec.SecTranslocateCreateOriginalPathForURL      # macOS 10.12+
+        fn.restype = ctypes.c_void_p
+        fn.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+        raw = app_path.encode("utf-8")
+        url = cf.CFURLCreateFromFileSystemRepresentation(None, raw, len(raw), True)
+        if not url:
+            return None
+        err = ctypes.c_void_p()
+        orig = fn(url, ctypes.byref(err))
+        cf.CFRelease(url)
+        if err.value:
+            cf.CFRelease(err)
+        if not orig:
+            return None
+        buf = ctypes.create_string_buffer(4096)
+        ok = cf.CFURLGetFileSystemRepresentation(orig, True, buf, len(buf))
+        cf.CFRelease(orig)
+        path = buf.value.decode("utf-8") if ok else None
+        return path if path and "/AppTranslocation/" not in path else None
+    except Exception:
+        return None
+
+
+def _exe_dir():
+    """(folder the app lives in, note). On macOS that's the folder containing
+    the .app -- its ORIGINAL location even if macOS translocated it."""
+    app = _app_bundle()
+    if app is None:
+        return os.path.dirname(os.path.abspath(sys.executable)), ""
+    if "/AppTranslocation/" in app:
+        orig = _untranslocate(app)
+        if orig:
+            return os.path.dirname(orig), "macOS ran a quarantined copy; using the original folder"
+        return os.path.dirname(app), "translocated"
+    return os.path.dirname(app), ""
+
+
+def _probe(d):
+    """(usable, reason) for an editable dashes folder at d."""
+    try:
+        os.listdir(d)
+    except FileNotFoundError:
+        return False, "no dashes/ folder next to the app"
+    except PermissionError:
+        return False, "no permission to read it (macOS privacy)"
+    except OSError as e:
+        return False, "can't read it (%s)" % e.strerror
     probe = os.path.join(d, ".garw_write_test")
     try:
         with open(probe, "w"):
             pass
         os.remove(probe)
-        return True
-    except OSError:
-        return False
+        return True, ""
+    except OSError as e:
+        return False, "it's read-only (%s)" % (e.strerror or e)
 
 
 def _documents_root():
@@ -81,11 +147,23 @@ def resolve(here):
         return Paths("source", here, here)
 
     bundle = getattr(sys, "_MEIPASS", here)
-    exe_dir = _exe_dir()
-    if os.path.isdir(os.path.join(exe_dir, "dashes")) and _writable(os.path.join(exe_dir, "dashes")):
+    exe_dir, where_note = _exe_dir()
+    usable, why = _probe(os.path.join(exe_dir, "dashes"))
+    if usable:
         p = Paths("portable", bundle, exe_dir)
+        p.note = where_note
     else:
         p = Paths("documents", bundle, _documents_root())
+        if where_note == "translocated":
+            p.note = ("macOS is running a quarantined copy of the app from a temporary "
+                      "location, so the dashes/ folder beside it can't be seen. Fix: in "
+                      "Terminal run  xattr -dr com.apple.quarantine  on the app's folder, "
+                      "then relaunch.")
+        else:
+            p.note = "Not using %s: %s." % (os.path.join(exe_dir, "dashes"), why)
+            if "macOS privacy" in why:
+                p.note += (" Allow access in System Settings > Privacy & Security > "
+                           "Files and Folders, or move the folder out of Downloads/Desktop.")
         os.makedirs(p.user, exist_ok=True)
         for name in ("dashes", "screen_configs"):
             dst = os.path.join(p.user, name)
@@ -149,3 +227,6 @@ def install_log(paths):
     sys.stderr = _Tee(fh, sys.stderr)
     sys.stdout = _Tee(fh, sys.stdout)
     sys.stderr.write("[%s] dashes folder (%s mode): %s\n" % (APP_NAME, paths.mode, paths.dashes))
+    sys.stderr.write("[%s] app executable: %s\n" % (APP_NAME, sys.executable))
+    if paths.note:
+        sys.stderr.write("[%s] %s\n" % (APP_NAME, paths.note))

@@ -55,6 +55,8 @@ only the dash's own QML state (an open menu, a running animation) restarts.
 * Images aren't watched (Qt caches them); restart to see a changed PNG.
 * **Open dashes folder** (bottom-right) opens the folder in use.
 
+**Console output in the packaged apps:** on Windows run *GARW Dash Simulator Console.exe*; on macOS double-click *Run with Terminal.command* (both ship in the release zip). Output is also written to `simulator_log.txt` beside `dashes/`.
+
 ## Building the apps
 
 `.github/workflows/build.yml` builds both versions for macOS and Windows with

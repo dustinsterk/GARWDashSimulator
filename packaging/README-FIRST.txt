@@ -16,12 +16,17 @@ dashes on first run). The "Open dashes folder" button (bottom-right) always
 shows you which folder is in use.
 
 FIRST LAUNCH
-  macOS:   the app isn't signed by Apple, so macOS blocks it the first time.
-           Easiest fix -- open Terminal, type   xattr -dr com.apple.quarantine
-           (with a space at the end), drag this whole folder onto the Terminal
-           window, press Return. Then double-click the app normally.
-           (Or: try to open it, then System Settings > Privacy & Security >
-           "Open Anyway".)  The macOS build is for Apple Silicon (M1 and later).
+  macOS:   the app isn't signed by Apple. Before the first launch, clear the
+           download "quarantine" flag from the WHOLE folder: open Terminal,
+           type   xattr -dr com.apple.quarantine   (with a space at the end),
+           drag this folder (the one holding the app AND dashes/) onto the
+           Terminal window, press Return. Then double-click the app.
+           Why: while the flag is set, macOS runs a hidden temporary copy of
+           the app, which can't see the dashes/ folder beside it. ("Open
+           Anyway" in System Settings lets it launch but doesn't clear this.)
+           If the folder is in Downloads or Desktop, macOS may also ask to let
+           the app access that folder -- click Allow.
+           The macOS build is for Apple Silicon (M1 and later).
   Windows: SmartScreen may say "Windows protected your PC" -- click
            "More info" > "Run anyway".
 
@@ -34,9 +39,14 @@ BUILDING A DASH WITH HOT RELOAD
   F5 reloads once at any time. If a save has a QML error, the status bar shows
   the file, line and message; fix it and save again.
 
-ERRORS / LOGS
-  Everything the simulator would print to a terminal is written to
-  simulator_log.txt next to dashes/ (fresh each launch).
+ERRORS / LOGS -- seeing the console output
+  Windows: double-click "GARW Dash Simulator Console.exe" instead of the normal
+           exe -- same app, plus a console window showing live output (QML
+           errors, hot-reload messages). Closing that window quits the app.
+  macOS:   double-click "Run with Terminal.command" -- runs the app with its
+           output in a Terminal window.
+  Either way, everything is also written to simulator_log.txt next to dashes/
+  (fresh each launch).
 
 TWO VERSIONS
   "GARW Dash Simulator"      Qt 6 -- use this normally.
