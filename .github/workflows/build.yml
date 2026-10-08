@@ -1,0 +1,147 @@
+# Builds ready-to-run GARW Dash Simulator apps for macOS and Windows.
+#
+#   * Run it by hand: GitHub > Actions > "Build simulator apps" > Run workflow.
+#     The zips appear under the run's "Artifacts".
+#   * Push a version tag (git tag v1.2.0 && git push origin v1.2.0) to also
+#     publish them as a GitHub Release.
+#
+# Each job builds with PyInstaller (packaging/GARWDashSimulator.spec), launches
+# the built app with --smoke-test (fails the job if the app can't host dashes,
+# e.g. a QML module missing from the bundle), then zips it with an editable
+# dashes/ folder + README-FIRST.txt.
+
+name: Build simulator apps
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write          # needed only to publish the Release on tags
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.os_label }} (${{ matrix.variant }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    # The Qt 5 build depends on PyQt5 wheels, which are older and less certain
+    # on every runner (esp. Apple Silicon); don't let it block the main Qt 6 app.
+    continue-on-error: ${{ matrix.variant == 'qt5' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-latest, windows-latest]
+        variant: [qt6, qt5]
+        include:
+          - runner: macos-latest
+            os_label: macOS
+            os_tag: macOS-AppleSilicon
+          - runner: windows-latest
+            os_label: Windows
+            os_tag: Windows-x64
+          - variant: qt6
+            binding: "PySide6>=6.7"
+            app: GARW Dash Simulator
+          - variant: qt5
+            binding: "PyQt5>=5.15.10"
+            app: GARW Dash Simulator Qt5
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      GARW_VARIANT: ${{ matrix.variant }}
+      APP: ${{ matrix.app }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Version string
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF_NAME#v}"; else V="dev-${GITHUB_SHA::7}"; fi
+          echo "GARW_VERSION=$V" >> "$GITHUB_ENV"
+          SUFFIX=$([ "${{ matrix.variant }}" = qt5 ] && echo "-Qt5" || echo "")
+          echo "ZIP=GARWDashSimulator${SUFFIX}-${{ matrix.os_tag }}-$V.zip" >> "$GITHUB_ENV"
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller "${{ matrix.binding }}"
+          python -m pip list | grep -iE "pyinstaller|pyside6|pyqt5"
+
+      - name: Build app (PyInstaller)
+        run: pyinstaller --noconfirm packaging/GARWDashSimulator.spec
+
+      - name: Smoke test (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set +e
+          "dist/$APP.app/Contents/MacOS/$APP" --smoke-test
+          CODE=$?
+          cat "$HOME/Documents/GARW Dash Simulator/simulator_log.txt" || true
+          exit $CODE
+
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # windowed (GUI) exe: Start-Process -Wait is needed to get its exit code
+          $p = Start-Process -FilePath "dist/$env:APP/$env:APP.exe" -ArgumentList "--smoke-test" -Wait -PassThru
+          Get-Content "$env:USERPROFILE/Documents/GARW Dash Simulator/simulator_log.txt" -ErrorAction SilentlyContinue
+          exit $p.ExitCode
+
+      - name: Assemble release folder
+        run: |
+          OUT="release/$APP"
+          mkdir -p "$OUT/screen_configs"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            cp -R "dist/$APP.app" "$OUT/"
+          else
+            cp -R "dist/$APP/." "$OUT/"
+          fi
+          cp -R dashes "$OUT/dashes"
+          cp packaging/README-FIRST.txt "$OUT/"
+          find release \( -name ".DS_Store" -o -name "._*" \) -delete
+          ls -la "$OUT"
+
+      - name: Zip (macOS, keeps the .app's symlinks intact)
+        if: runner.os == 'macOS'
+        run: cd release && ditto -c -k --keepParent "$APP" "../$ZIP"
+
+      - name: Zip (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path "release/$env:APP" -DestinationPath "$env:ZIP"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP }}
+          path: ${{ env.ZIP }}
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: zips
+          merge-multiple: true
+      - run: ls -la zips
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: zips/*.zip
+          generate_release_notes: true
