@@ -106,6 +106,8 @@ jobs:
           mkdir -p "$OUT/screen_configs"
           if [ "$RUNNER_OS" = "macOS" ]; then
             cp -R "dist/$APP.app" "$OUT/"
+            cp "packaging/Run with Terminal.command" "$OUT/"
+            chmod +x "$OUT/Run with Terminal.command"
           else
             cp -R "dist/$APP/." "$OUT/"
           fi
