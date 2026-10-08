@@ -45,8 +45,8 @@ try:
                               qInstallMessageHandler, QtMsgType,
                               pyqtSignal as Signal, pyqtSlot as Slot,
                               pyqtProperty as Property)
-    from PyQt5.QtGui import QFont, QKeyEvent
-    from PyQt5.QtQml import qmlRegisterType
+    from PyQt5.QtGui import QFont, QKeyEvent, QDesktopServices
+    from PyQt5.QtQml import qmlRegisterType, QQmlComponent
     from PyQt5.QtWidgets import (
         QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QGridLayout,
         QLabel, QSlider, QCheckBox, QComboBox, QPushButton, QGroupBox, QScrollArea,
@@ -57,8 +57,8 @@ try:
 except ImportError:
     from PySide6.QtCore import (Qt, QObject, Property, Signal, Slot, QUrl, QTimer,
                                 QEvent, qInstallMessageHandler, QtMsgType)
-    from PySide6.QtGui import QFont, QKeyEvent
-    from PySide6.QtQml import qmlRegisterType
+    from PySide6.QtGui import QFont, QKeyEvent, QDesktopServices
+    from PySide6.QtQml import qmlRegisterType, QQmlComponent
     from PySide6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QGridLayout,
         QLabel, QSlider, QCheckBox, QComboBox, QPushButton, QGroupBox, QScrollArea,
@@ -68,6 +68,14 @@ except ImportError:
     _BINDING = "PySide6"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+import hot_reload    # noqa: E402  (needs the Qt binding imported above)
+import app_paths     # noqa: E402
+# Folder layout: next to this script when run from source; for packaged apps
+# an editable dashes/ beside the app, else Documents/GARW Dash Simulator/.
+PATHS = app_paths.resolve(HERE)
+app_paths.install_log(PATHS)
 
 
 def _find_dir(name):
@@ -89,8 +97,8 @@ def _find_stage():
     return os.path.join(QMLCOMPAT, "Stage.qml")   # report the expected path
 
 
-QMLCOMPAT = _find_dir("qmlcompat")
-DASHES_DIR = _find_dir("dashes")
+QMLCOMPAT = PATHS.qmlcompat if PATHS.mode != "source" else _find_dir("qmlcompat")
+DASHES_DIR = PATHS.dashes if PATHS.mode != "source" else _find_dir("dashes")
 STAGE_QML = None   # resolved at window build time (after QMLCOMPAT is set)
 
 
@@ -590,6 +598,16 @@ class MainWindow(QMainWindow):
         self.demo_timer.timeout.connect(self._demo_tick)
         self.demo_phase = 0.0
 
+        self.hot = hot_reload.HotReloader(self, self._on_files_changed)
+        self.statusBar().setSizeGripEnabled(False)
+        folder_btn = QPushButton("Open dashes folder")
+        folder_btn.setFlat(True)
+        folder_btn.setToolTip(DASHES_DIR)
+        folder_btn.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(DASHES_DIR)))
+        self.statusBar().addPermanentWidget(folder_btn)
+        if PATHS.mode != "source":
+            self.statusBar().showMessage("Dashes folder: " + DASHES_DIR, 8000)
         self.dashes = self._load_dash_list()
         self.dash_combo.addItems([d["name"] for d in self.dashes])
         # Select the first dash in the list on launch.
@@ -604,6 +622,10 @@ class MainWindow(QMainWindow):
         QApplication.instance().installEventFilter(self)
 
         self._fit_window()
+        if "--hot" in sys.argv:                 # start with hot reload on
+            self.hot_btn.setChecked(True)
+        if "--smoke-test" in sys.argv:
+            QTimer.singleShot(2000, self._smoke_test)
 
     def _fit_window(self):
         """Open large enough to show the whole control panel without scrolling,
@@ -623,7 +645,7 @@ class MainWindow(QMainWindow):
             panel_h += body.sizeHint().height()
         # The render area has its own minimum; take whichever side is taller.
         content_h = max(self.view.minimumHeight(), panel_h)
-        win_w, win_h = 1200, content_h + 56     # + window chrome / margins
+        win_w, win_h = 1200, content_h + 56 + self.statusBar().sizeHint().height()     # + window chrome / margins
 
         screen = QApplication.primaryScreen()
         if screen is not None:
@@ -640,6 +662,10 @@ class MainWindow(QMainWindow):
         et = event.type()
         if et in (QEvent.KeyPress, QEvent.KeyRelease) and isinstance(event, QKeyEvent):
             key = event.key()
+            if key == Qt.Key_F5:
+                if et == QEvent.KeyPress and not event.isAutoRepeat():
+                    self._reload_dash("F5")
+                return True
             if key in self._key_map:
                 name = self._key_map[key]
                 if et == QEvent.KeyPress:
@@ -725,10 +751,12 @@ class MainWindow(QMainWindow):
         # the dash creates FileIO objects during construction). All screens
         # share one screen_configs dir, mirroring the car.
         FileIO.dash_dir = meta["dir"]
-        FileIO.config_dir = os.path.join(HERE, "screen_configs")
+        FileIO.config_dir = PATHS.configs
         url = QUrl.fromLocalFile(meta["entry_path"])
         if self.stage is not None:
             self.stage.setProperty("dashSource", url)
+        if getattr(self, "hot", None) is not None:
+            self.hot.set_roots([meta["dir"]])   # follow the selected dash
         self.note.setText(meta.get("notes", ""))
         # Warn if the dash's QML uses ES6 'let'/'const' declarations, which the
         # IC7's QML/JS engine (Qt 5.12 QV4) does not support.
@@ -750,6 +778,84 @@ class MainWindow(QMainWindow):
                 self._warn_inline_shaders(shader_hits)
             else:
                 QTimer.singleShot(0, lambda h=shader_hits: self._warn_inline_shaders(h))
+
+    # ---- packaging self-check (used by the GitHub Actions build) ------------
+    def _smoke_test(self):
+        """--smoke-test: verify the app can host dashes, then exit 0/1. Catches a
+        packaged build that is missing a QML module the dashes rely on."""
+        problems = []
+        if self.stage is None:
+            problems.append("Stage.qml did not load")
+        elif self.stage.property("dashFailed"):
+            problems.append("default dash failed to load: %s"
+                            % (_RECENT_QML_MSGS[-1] if _RECENT_QML_MSGS else "?"))
+        comp = QQmlComponent(self.view.engine())
+        comp.setData(b"import QtQuick 2.0\nimport QtQuick.Shapes 1.0\n"
+                     b"import QtGraphicalEffects 1.0\nimport FileIO 1.0\nItem {}\n",
+                     QUrl.fromLocalFile(os.path.join(DASHES_DIR, "_smoke_test.qml")))
+        if comp.isError():
+            problems += [e.toString() for e in comp.errors()]
+        sys.stderr.write("[smoke test] mode=%s dashes=%d -> %s\n" % (
+            PATHS.mode, len(self.dashes), "FAIL: " + "; ".join(problems) if problems else "OK"))
+        sys.stderr.flush()
+        QApplication.exit(1 if problems else 0)
+
+    # ---- hot reload ------------------------------------------------------
+    # Saving any .qml/.js in the current dash's folder (while "Hot reload" is
+    # on) re-loads the dash from disk. F5 reloads once, any time. The simulated
+    # signals (RPM, speed, inputs...) live in the data object, so they carry
+    # straight over; only the dash's own QML state (e.g. an open menu) resets.
+    def _toggle_hot_reload(self, on):
+        self.hot.set_enabled(on)
+        idx = self.dash_combo.currentIndex()
+        where = os.path.basename(self.dashes[idx]["dir"]) if 0 <= idx < len(self.dashes) else ""
+        self.statusBar().showMessage(
+            ("Hot reload ON \u2014 watching %s/ (save a .qml/.js to reload, F5 = reload now)" % where)
+            if on else "Hot reload off", 4000)
+
+    def _on_files_changed(self, changed):
+        idx = self.dash_combo.currentIndex()
+        base = self.dashes[idx]["dir"] if 0 <= idx < len(self.dashes) else ""
+        names = [os.path.relpath(p, base) if base else os.path.basename(p) for p in changed]
+        self._reload_dash(", ".join(names[:3]) + (" +%d" % (len(names) - 3) if len(names) > 3 else ""))
+
+    def _reload_dash(self, why=""):
+        idx = self.dash_combo.currentIndex()
+        if self.stage is None or not (0 <= idx < len(self.dashes)):
+            return
+        url = QUrl.fromLocalFile(self.dashes[idx]["entry_path"])
+        del _RECENT_QML_MSGS[:]          # collect only this reload's errors
+        # 1) unload the running dash so nothing references its compiled QML ...
+        self.stage.setProperty("dashSource", QUrl())
+        # 2) ... let the event loop actually delete it, then drop the stale
+        #    compiled types (incl. child components) and load fresh from disk.
+        QTimer.singleShot(50, lambda: self._finish_reload(url, why))
+
+    def _finish_reload(self, url, why):
+        eng = self.view.engine()
+        # make sure the unloaded dash is really gone before trimming the cache
+        QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        eng.collectGarbage()
+        eng.trimComponentCache()        # NOT clearComponentCache: that would also
+                                        # break Stage.qml's own live bindings
+        self.stage.setProperty("dashSource", url)
+        failed = bool(self.stage.property("dashFailed"))
+        stamp = __import__("time").strftime("%H:%M:%S")
+        if failed:
+            import re
+            located = [m for m in _RECENT_QML_MSGS if re.search(r"\.(qml|js):\d+", m)]
+            first = (located or _RECENT_QML_MSGS or ["see the console / log"])[0]
+            dash_url = QUrl.fromLocalFile(self.dashes[self.dash_combo.currentIndex()]["dir"]).toString()
+            msg = "%s  Reload FAILED (%s): %s" % (stamp, why or "manual",
+                                                  first.replace(dash_url + "/", ""))
+        else:
+            msg = "%s  Reloaded%s" % (stamp, (" \u2014 " + why) if why else "")
+            hits = self._scan_for_let(self.dashes[self.dash_combo.currentIndex()]["dir"])
+            if hits:
+                msg += "   \u26a0 uses let/const (won't run on the IC7)"
+        self.statusBar().showMessage(msg, 0 if failed else 6000)
+        sys.stderr.write("[hot reload] %s\n" % msg)
+        sys.stderr.flush()
 
     # ---- IC7 compatibility checks --------------------------------------
     def _scan_for_let(self, dash_dir):
@@ -881,6 +987,12 @@ class MainWindow(QMainWindow):
         self.demo_btn.setCheckable(True)
         self.demo_btn.toggled.connect(self._toggle_demo)
         top.addWidget(self.demo_btn)
+        self.hot_btn = QPushButton("\u27f3  Hot reload")
+        self.hot_btn.setCheckable(True)
+        self.hot_btn.setToolTip("Watch this dash's folder: saving a .qml/.js file "
+                                "reloads the dash live.\nF5 reloads once at any time.")
+        self.hot_btn.toggled.connect(self._toggle_hot_reload)
+        top.addWidget(self.hot_btn)
         outer.addLayout(top)
 
         # demo speed (0 .. 2x) with a perceptual (quadratic) response: the slow
@@ -1288,6 +1400,9 @@ class MainWindow(QMainWindow):
         self.data.set_bit(mask, on)
 
 
+_RECENT_QML_MSGS = []      # last few messages, so a failed hot reload can show them
+
+
 def _qt_message_filter(mode, ctx, msg):
     # Some dashes read rpmtest.<field> / realtimedata.<field> without a null
     # guard. While a dash is being (re)instantiated by the Loader, those bindings
@@ -1310,7 +1425,11 @@ def _qt_message_filter(mode, ctx, msg):
     )
     if shader_noise:
         return
+    _RECENT_QML_MSGS.append(msg)
+    del _RECENT_QML_MSGS[:-20]
     stream = sys.stderr
+    if stream is None:          # windowed build without a log: nowhere to write
+        return
     stream.write(msg + "\n")
     stream.flush()
 

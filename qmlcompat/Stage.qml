@@ -7,6 +7,8 @@ Rectangle {
     id: root
     color: "#000000"
     property url dashSource: ""
+    // plain bool for Python (PySide6 can't convert the Loader.Status enum)
+    readonly property bool dashFailed: loader.status === Loader.Error
 
     // Reload helper invoked from Python when the dash selection changes.
     function setDash(src) {
@@ -27,6 +29,7 @@ Rectangle {
 
         Loader {
             id: loader
+            objectName: "dashLoader"
             anchors.fill: parent
             asynchronous: false
             source: root.dashSource
