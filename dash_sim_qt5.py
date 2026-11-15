@@ -50,7 +50,7 @@ try:
     from PyQt5.QtWidgets import (
         QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QGridLayout,
         QLabel, QSlider, QCheckBox, QComboBox, QPushButton, QGroupBox, QScrollArea,
-        QSizePolicy, QFrame, QLineEdit, QMessageBox,
+        QSizePolicy, QFrame, QLineEdit, QMessageBox, QStyleFactory,
     )
     from PyQt5.QtQuickWidgets import QQuickWidget
     _BINDING = "PyQt5"
@@ -62,7 +62,7 @@ except ImportError:
     from PySide6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QGridLayout,
         QLabel, QSlider, QCheckBox, QComboBox, QPushButton, QGroupBox, QScrollArea,
-        QSizePolicy, QFrame, QLineEdit, QMessageBox,
+        QSizePolicy, QFrame, QLineEdit, QMessageBox, QStyleFactory,
     )
     from PySide6.QtQuickWidgets import QQuickWidget
     _BINDING = "PySide6"
@@ -453,6 +453,19 @@ GEARS = [("N", 0), ("1", 1), ("2", 2), ("3", 3), ("4", 4),
          ("5", 5), ("6", 6), ("7", 7), ("8", 8), ("P", 9), ("R", 10)]
 
 
+_FLAT_SLIDER_STYLE = None
+
+
+def _flat_slider_style():
+    """Fusion style for the signal sliders on macOS. The native macOS slider
+    animates its knob to each new value; when the Demo updates it ~30x/sec
+    that leaves a trailing "ghost" knob. Fusion draws it in place instantly."""
+    global _FLAT_SLIDER_STYLE
+    if _FLAT_SLIDER_STYLE is None:
+        _FLAT_SLIDER_STYLE = QStyleFactory.create("Fusion")
+    return _FLAT_SLIDER_STYLE
+
+
 # ---------------------------------------------------------------------------
 #  A labeled slider row that reports float values (with optional scaling).
 # ---------------------------------------------------------------------------
@@ -470,6 +483,8 @@ class SliderRow(QWidget):
         self.name = QLabel(label)
         self.name.setMinimumWidth(120)
         self.slider = QSlider(Qt.Horizontal)
+        if sys.platform == "darwin":
+            self.slider.setStyle(_flat_slider_style())   # no ghost knob (see above)
         self.slider.setMinimum(int(lo / scale))
         self.slider.setMaximum(int(hi / scale))
         self.slider.setValue(int(init / scale))
@@ -1269,36 +1284,69 @@ class MainWindow(QMainWindow):
         self.demo_phase += 0.012 * self.demo_speed
         t = self.demo_phase % 1.0          # 0..1 over the cycle
 
-        # ---- realistic shift sequence ------------------------------------
-        # Launch from idle, rev to a shift point just shy of redline, then each
-        # upshift drops the rpm less than the last (close-ratio box). Speed
-        # climbs smoothly and only rpm drops on a shift, like a real car.
-        redline   = self.rpm.slider.maximum() * self.rpm.scale
-        speedmax  = self.speed.slider.maximum() * self.speed.scale
-        idle      = 500
-        shift_rpm = min(9500, redline)         # upshift just before redline
-        n_gears   = 6
-        T_accel   = 0.82                        # cycle fraction spent accelerating
+        # ---- drive cycle -------------------------------------------------
+        # Stopped in N -> launch and upshift at varied, realistic shift points
+        # (well below redline) -> cruise in top gear -> brake with rev-matched
+        # downshifts -> stop in N. Speed is the "truth" and rpm = speed x the
+        # current gear's ratio, so every shift moves rpm by the real ratio step.
+        # The demo never selects R.
+        redline  = self.rpm.slider.maximum() * self.rpm.scale
+        speedmax = self.speed.slider.maximum() * self.speed.scale
+        vmax     = speedmax * 0.92
+        idle     = 800 if redline >= 4000 else redline * 0.12
+        reach    = [0.20, 0.34, 0.50, 0.70, 0.95, 1.30]   # share of vmax each gear hits AT redline
+        n_gears  = len(reach)
+        upshift  = [0.78, 0.84, 0.72, 0.80, 0.68]         # shift points (x redline), varied
+        down_at  = 0.30                                   # downshift below this (x redline)
+        v_peak, v_cruise = 0.80, 0.62                     # shares of vmax
 
-        if t < T_accel:
-            g_pos = (t / T_accel) * n_gears     # 0 .. n_gears
-            gear  = min(n_gears, int(g_pos) + 1)
-            gear_frac = g_pos - int(g_pos)      # 0..1 progress within the gear
-            # rpm the engine catches at right after each shift (gear 1 launches
-            # from idle); higher gears are closer ratios, so the drop shrinks.
-            bottoms = [idle / shift_rpm, 0.72, 0.77, 0.81, 0.84, 0.87]
-            bottom  = bottoms[gear - 1] * shift_rpm
-            # slight ease so it "hangs" near the top before the shift
-            rpm   = bottom + (gear_frac ** 0.9) * (shift_rpm - bottom)
-            speed = (g_pos / n_gears) * speedmax * 0.92
+        def rpm_in(g, v):
+            return redline * v / reach[g - 1]
+
+        T_STOP, T_ACC, T_CRUISE, T_DEC = 0.06, 0.50, 0.72, 0.97
+        phase = "stop"
+        if t < T_STOP or t >= T_DEC:
+            v = 0.0
+        elif t < T_ACC:
+            u = (t - T_STOP) / (T_ACC - T_STOP)
+            v = v_peak * (1.0 - (1.0 - u) ** 1.7)         # strong pull that tapers off
+            phase = "accel"
+        elif t < T_CRUISE:
+            u = (t - T_ACC) / (T_CRUISE - T_ACC)
+            e = min(1.0, u * 3.0)
+            v = (v_peak + (v_cruise - v_peak) * e * e * (3 - 2 * e)
+                 + math.sin(u * math.pi * 4) * 0.008)
+            phase = "cruise"
         else:
-            # lift off and coast back down toward idle
-            de        = (t - T_accel) / (1.0 - T_accel)     # 0..1
-            gear_frac = 0.0
-            gear      = max(1, n_gears - int(de * (n_gears - 1)))
-            rpm       = idle + (1.0 - de) * (shift_rpm * 0.5 - idle)
-            speed     = max(0.0, speedmax * 0.92 * (1.0 - de))
-        rpm   = max(idle, min(rpm, redline))
+            u = (t - T_CRUISE) / (T_DEC - T_CRUISE)
+            v = v_cruise * (1.0 - u * u * (3 - 2 * u))
+            phase = "decel"
+
+        if v <= 0.02:
+            gear, rpm = 0, idle                           # N: stopped, clutch in
+        elif phase == "accel":
+            gear = n_gears
+            for g in range(1, n_gears):
+                if rpm_in(g, v) < upshift[g - 1] * redline:
+                    gear = g
+                    break
+            rpm = rpm_in(gear, v)
+            if gear == 1:                                 # clutch slip off the line
+                rpm = max(rpm, idle + (0.32 * redline - idle) * min(1.0, v / 0.05))
+        elif phase == "decel":
+            gear = 1
+            for g in range(n_gears, 0, -1):
+                if rpm_in(g, v) >= down_at * redline:
+                    gear = g
+                    break
+            rpm = rpm_in(gear, v)
+        else:
+            gear = n_gears
+            rpm = rpm_in(gear, v) * (1.0 + math.sin(self.demo_phase * 9.0) * 0.015)
+        rpm   = max(idle, min(rpm, redline * 0.9))
+        speed = v * vmax
+        shift_prog = (rpm / (upshift[gear - 1] * redline)
+                      if phase == "accel" and 1 <= gear < n_gears else 0.0)
 
         # Round display values to whole numbers (the dashes show these directly,
         # so raw floats would render as ugly long decimals).
@@ -1339,9 +1387,9 @@ class MainWindow(QMainWindow):
         blink        = int(self.demo_phase * 4) % 2 == 0
         lamp         = t < 0.10                       # key-on self-test each cycle
         night        = 0.30 < t < 0.62               # lights-on stretch
-        decel        = t > 0.82                       # coast/brake phase
-        hard_accel   = (gear_frac > 0.55) and (gear < 6) and not decel
-        near_redline = (gear_frac > 0.85) and not decel
+        decel        = phase == "decel"               # braking phase
+        hard_accel   = phase == "accel" and rpm > 0.6 * redline
+        near_redline = shift_prog > 0.90             # approaching the shift point
 
         # indicators / lights
         self._demo_input(0x40,       blink and t < 0.25)            # left indicator
@@ -1358,7 +1406,7 @@ class MainWindow(QMainWindow):
         self._demo_input(0x400,      lamp or t < 0.15)              # seatbelt
         self._demo_input(0x4000,     lamp or t < 0.06)              # door open
         self._demo_input(0x8000000,  lamp or t < 0.06)              # handbrake
-        self._demo_input(0x4000000,  t > 0.985)                     # reverse (stopped)
+        self._demo_input(0x4000000,  False)                         # reverse: never in the demo
         # warning lamps -- only during the self-test, so the drive looks healthy
         self._demo_input(0x02,       lamp)                          # battery warn
         self._demo_input(0x200,      lamp)                          # oil warn
@@ -1373,8 +1421,8 @@ class MainWindow(QMainWindow):
         self._demo_input(0x800000,   0.62 < t < 0.90)               # race mode
         # shift lights climb as revs approach redline
         self._demo_input(0x80000,    near_redline)                  # shift 1
-        self._demo_input(0x100000,   near_redline and gear_frac > 0.90)   # shift 2
-        self._demo_input(0x200000,   near_redline and gear_frac > 0.95)   # shift 3
+        self._demo_input(0x100000,   shift_prog > 0.95)                  # shift 2
+        self._demo_input(0x200000,   shift_prog > 0.98)                  # shift 3
 
         # Mirror the whole control panel so the UI tracks the demo live: every
         # analog slider follows its value, the gear box follows, and the input
