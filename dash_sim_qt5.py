@@ -629,9 +629,19 @@ class MainWindow(QMainWindow):
             else:
                 self.statusBar().showMessage("Dashes folder: " + DASHES_DIR, 8000)
         self.dashes = self._load_dash_list()
-        self.dash_combo.addItems([d["name"] for d in self.dashes])
-        # Select the first dash in the list on launch.
-        default_idx = 0
+        # main entries read "---GTDash---" (and are bold, below) so each
+        # dash stands out from the component files listed after it
+        self.dash_combo.addItems([("---%s---" % d["name"]) if d.get("main") else d["name"]
+                                  for d in self.dashes])
+        # Bold each folder's main entry (Foo/Foo.qml) so it stands out from the
+        # component files (SettingsMenu, Theme, ...) that live beside it.
+        bold = QFont(self.dash_combo.font())
+        bold.setBold(True)
+        for i, d in enumerate(self.dashes):
+            if d.get("main"):
+                self.dash_combo.setItemData(i, bold, Qt.FontRole)
+        # Start on the first real dash rather than whatever file sorts first.
+        default_idx = next((i for i, d in enumerate(self.dashes) if d.get("main")), 0)
         self.dash_combo.setCurrentIndex(default_idx)
         self._select_dash(default_idx)
         self._push_all()
@@ -737,7 +747,7 @@ class MainWindow(QMainWindow):
             elif "entry" in raw:
                 entries = [raw]
             else:
-                qmls = [os.path.basename(q) for q in glob.glob(os.path.join(d, "*.qml"))
+                qmls = [os.path.basename(q) for q in sorted(glob.glob(os.path.join(d, "*.qml")))
                         if os.path.basename(q) not in ("main.qml", "capture.qml")]
                 if not qmls:
                     continue
@@ -750,14 +760,22 @@ class MainWindow(QMainWindow):
                 entries = [{"name": os.path.splitext(q)[0][:-5] if q.endswith("_main.qml")
                             else os.path.splitext(q)[0],
                             "entry": q} for q in chosen]
+            folder = os.path.basename(os.path.normpath(d)).lower()
+            group = []
             for e in entries:
                 meta = dict(e)
                 meta["dir"] = d
+                # the folder's main entry: Foo/Foo.qml (or Foo/Foo_main.qml)
+                stem = os.path.splitext(meta["entry"])[0].lower()
+                meta["main"] = stem in (folder, folder + "_main")
                 meta["entry_path"] = os.path.join(d, meta["entry"])
                 meta.setdefault("name", os.path.splitext(meta["entry"])[0])
                 meta.setdefault("rpmmax", raw.get("rpmmax", 10000))
                 meta.setdefault("speedmax", raw.get("speedmax", 320))
-                out.append(meta)
+                group.append(meta)
+            # main entry first, then its components alphabetically
+            group.sort(key=lambda m: (not m["main"], m["name"].lower()))
+            out.extend(group)
         return out
 
     def _select_dash(self, idx):
